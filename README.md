@@ -16,6 +16,8 @@ flowchart LR
     H -->|Surface result| G
     G -->|Combined record| I[storage.py]
     I --> J[observations.sqlite3]
+    J -->|Read local rows| K[upload_supabase.py]
+    K -->|HTTPS JSON| L[Supabase observations]
 ```
 
 | File | Input -> processing -> output |
@@ -27,6 +29,7 @@ flowchart LR
 | `main.py` | Frame, GPS and module results -> check GPS timing/accuracy and combine fields -> record dictionary. |
 | `storage.py` | Record dictionary -> parameterized SQLite INSERT -> saved row and record ID. Adds missing IMU columns to old databases. |
 | `test_pipeline.py` | Run the full pipeline once, then inject five cases into the modules separately -> check their combined records -> console results and `test_observations.sqlite3`. |
+| `upload_supabase.py` | Read SQLite rows -> convert boolean/JSON fields -> send batches to Supabase REST API and print upload counts. |
 
 ## Actual inputs and outputs: test case 1
 
@@ -189,3 +192,49 @@ For real collection, set `seg_model_path` in `inference.py` and run:
 Real records are saved to `observations.sqlite3` in the working directory. The phone sends GPS to the Pi's LAN IP on port 8000 at `/gps`.
 
 The separate IMU model is still unknown. BLE address and notification UUID remain unset. Install `bleak` for BLE and adapt `decode_packet()` to the device protocol; Bluetooth serial needs a different transport. Enable `mounting_calibrated` after mounting and axis/sensor calibration. Missing, stale or unsuitable IMU data yields NULL metrics; uncalibrated mounting yields NULL slope. GPS and image collection can continue without the IMU.
+
+## Upload to Supabase
+
+The uploader runs separately: SQLite -> JSON batches -> HTTPS POST -> Supabase. It reads a snapshot of all local records without changing SQLite. Each run upserts by `(id, record_time)`, so sending the same records again updates them. A failure stops the upload; rerun after fixing the error. It uses the Python standard library.
+
+| Function | Input -> output |
+| --- | --- |
+| `read_records(db_path)` | SQLite path -> list of record dictionaries; converts `objects_supported` to boolean and stored `objects` text to JSON. |
+| `upload_records(records, supabase_url, api_key)` | Records and connection values -> sends batches of 100 to `/rest/v1/observations` -> uploaded count. |
+| `main()` | Database argument and environment variables -> reads records, uploads, prints progress; exits with code 1 on error. |
+
+Get the project URL from the Supabase dashboard's Data API/Connect screen and a **Secret key** (`sb_secret_...`) from **Settings > API Keys**. Store them as `SUPABASE_URL` and `SUPABASE_SECRET_KEY`. This key is for a private upload environment you control; keep it out of source code, GitHub and chat. A legacy `service_role` key can instead use `SUPABASE_SERVICE_ROLE_KEY`. New keys use the `apikey` header; legacy JWT keys also use `Authorization: Bearer` ([API keys](https://supabase.com/docs/guides/getting-started/api-keys)).
+
+`SUPABASE_URL` accepts either `https://your-project.supabase.co` or `https://your-project.supabase.co/rest/v1/`. The uploader builds `/rest/v1/observations` once and prints the destination URL. HTTP 404 with `PGRST125` means the request path is invalid; check for a repeated `/rest/v1` or a table name appended to the configured base URL.
+
+For a new destination table, run this once in the Supabase SQL Editor. The script expects these columns and the composite primary key. An existing table needs the same schema; `CREATE TABLE IF NOT EXISTS` leaves an existing schema unchanged.
+
+```sql
+CREATE TABLE IF NOT EXISTS public.observations (
+    id bigint NOT NULL,
+    record_time timestamptz NOT NULL,
+    latitude double precision,
+    longitude double precision,
+    surface_label text,
+    surface_confidence double precision,
+    slope_percent double precision,
+    vibration_frequency_avg_hz double precision,
+    objects_supported boolean NOT NULL DEFAULT false,
+    objects jsonb,
+    PRIMARY KEY (id, record_time)
+);
+ALTER TABLE public.observations ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE ON public.observations TO service_role;
+```
+
+Enable the project's Data API with the `public` schema exposed. In a Bash terminal, set the URL, enter the key at the hidden prompt, and upload the five sample records:
+
+```bash
+export SUPABASE_URL="https://your-project.supabase.co"
+read -rsp "Supabase secret key: " SUPABASE_SECRET_KEY
+export SUPABASE_SECRET_KEY
+printf '\n'
+python3 upload_supabase.py test_observations.sqlite3
+```
+
+For collected observations, run `python3 upload_supabase.py` (default: `observations.sqlite3`). A successful sample upload prints `Uploaded 5/5 records.` and `Upload complete: 5 records sent to observations.` SQLite `0` becomes JSON `false`; `NULL` stays JSON `null`. The local IDs and all observation fields are preserved. `CONFIG` in the script sets the table, batch size and timeout. Query the destination with `SELECT * FROM public.observations ORDER BY record_time, id;`.
