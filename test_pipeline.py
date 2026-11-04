@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import random
 import sqlite3
+import struct
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -62,6 +63,7 @@ def inject_camera(case):
 def inject_imu(imu_state, case, frame_monotonic):
     imu_state["clock_offset_s"] = frame_monotonic - 2.0
     angle = math.atan(case["slope_percent"] / 100)
+    packets = []
     for index in range(200):
         timestamp = (index + 1) / 100
         payload = {
@@ -73,8 +75,18 @@ def inject_imu(imu_state, case, frame_monotonic):
             ),
             "gx": 0.0, "gy": 0.0, "gz": 0.0,
         }
-        data = json.dumps(payload).encode()
-        assert imu.add_sample(imu_state, imu.decode_packet(data))
+        values = []
+        for key in ("ax", "ay", "az"):
+            values.append(round(payload[key] / 9.80665 * 32768 / 16))
+        for key in ("gx", "gy", "gz"):
+            values.append(round(math.degrees(payload[key]) * 32768 / 2000))
+        data = b"\x55\x61" + struct.pack("<9h", *values, 0, 0, 0)
+        packets.append(data)
+    stream = b"".join(packets)
+    with patch.object(imu.time, "monotonic", return_value=frame_monotonic):
+        imu.receive_data(imu_state, stream[:11])
+        assert not imu_state["samples"]
+        imu.receive_data(imu_state, stream[11:])
 
 
 def simulate_qnn(command, case):
@@ -219,7 +231,7 @@ def test_module_case(case, connection, database_path, model_path):
         assert abs(imu_result["vibration_frequency_avg_hz"] - case["vibration_frequency_hz"]) < 0.1
         assert imu.get_window(imu_state, frame["frame_monotonic"] + 1.0) == []
         assert imu.analyze_samples([]) == {"slope_percent": None, "vibration_frequency_avg_hz": None}
-        print("imu.py: 200 JSON samples -> metrics", json.dumps(imu_result))
+        print("imu.py: 200 binary BLE packets -> metrics", json.dumps(imu_result))
 
         result = inject_inference(frame["image"], case, model_path)
         assert result["surface_label"] == case["surface_label"]
@@ -268,10 +280,36 @@ def test_module_integration(database_path, model_path):
     print("STAGE 2: PASS - 5/5 module integrations.")
 
 
+def test_imu_clock_drift():
+    packet = b"\x55\x61" + struct.pack("<9h", 0, 0, 2048, 0, 0, 0, 0, 0, 0)
+    for actual_rate in (99.3, 100.7):
+        with patch.dict(imu.CONFIG, {"device_address": None, "sample_rate_hz": 100}):
+            state = imu.start_imu()
+            try:
+                previous_time = 0.0
+                for batch in range(2500):
+                    jitter = (0.0, 0.012, -0.008, 0.004)[batch % 4]
+                    receive_time = 1000 + (batch + 1) * 4 / actual_rate + jitter
+                    with patch.object(imu.time, "monotonic", return_value=receive_time):
+                        imu.receive_data(state, packet * 4)
+                    samples = imu.get_window(state, receive_time + 0.005)
+                    assert samples, (actual_rate, batch)
+                    assert samples[-1]["sample_monotonic"] > previous_time
+                    previous_time = samples[-1]["sample_monotonic"]
+                    if batch > 100:
+                        assert len(samples) >= 180
+                        assert samples[-1]["sample_monotonic"] - samples[0]["sample_monotonic"] > 1.6
+                assert imu.get_window(state, receive_time + 0.2) == []
+            finally:
+                imu.stop_imu(state)
+    print("IMU TIMING: PASS - slow clock drift, notification jitter, and stale-data rejection.")
+
+
 def run_test():
     saved_database_path = Path(__file__).resolve().with_name("test_observations.sqlite3")
     print("Mode: software test; device input, model loading, and QNN execution are simulated.")
     print("HTTP, camera pipe reading, IMU calculations, inference processing, and SQLite are real.")
+    test_imu_clock_drift()
     with tempfile.TemporaryDirectory(prefix="rubik-pipeline-test-") as directory:
         smoke_database_path = Path(directory) / "smoke.sqlite3"
         integration_database_path = Path(directory) / "integration.sqlite3"

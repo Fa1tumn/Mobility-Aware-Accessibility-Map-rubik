@@ -2,14 +2,17 @@ import asyncio
 from collections import deque
 import json
 import math
+import struct
 import threading
 import time
 
 import numpy as np
 
 CONFIG = {
-    "device_address": None,
-    "notify_uuid": None,
+    "device_address": "C8:2C:72:8F:2B:2C",
+    "notify_uuid": "0000ffe4-0000-1000-8000-00805f9a34fb",
+    "write_uuid": "0000ffe9-0000-1000-8000-00805f9a34fb",
+    "sample_rate_hz": 100,
     "mounting_calibrated": False,
     "window_s": 2.0,
 }
@@ -22,7 +25,9 @@ def start_imu() -> dict:
         "stop_event": threading.Event(),
         "thread": None,
         "clock_offset_s": None,
-        "last_device_time_s": None,
+        "last_sample_time_s": None,
+        "byte_buffer": bytearray(),
+        "received_samples": 0,
         "error": None,
     }
     if CONFIG["device_address"] is None or CONFIG["notify_uuid"] is None:
@@ -34,14 +39,63 @@ def start_imu() -> dict:
     return imu_state
 
 
-def decode_packet(data) -> dict:
-    try:
-        payload = json.loads(bytes(data).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("Adapt decode_packet to the IMU device's Bluetooth frame format.") from error
-    if not isinstance(payload, dict):
-        raise ValueError("IMU packet must decode to a sample dictionary.")
-    return payload
+def decode_packet(data, timestamp_s) -> dict:
+    if len(data) != 20 or data[:2] != b"\x55\x61":
+        raise ValueError("Expected a 20-byte WT901BLE packet starting with 55 61.")
+    values = struct.unpack("<9h", data[2:])
+    acceleration_scale = 16 * 9.80665 / 32768
+    gyro_scale = math.radians(2000) / 32768
+    return {
+        "timestamp_s": timestamp_s,
+        "ax": values[0] * acceleration_scale,
+        "ay": values[1] * acceleration_scale,
+        "az": values[2] * acceleration_scale,
+        "gx": values[3] * gyro_scale,
+        "gy": values[4] * gyro_scale,
+        "gz": values[5] * gyro_scale,
+    }
+
+
+def receive_data(imu_state, data):
+    buffer = imu_state["byte_buffer"]
+    buffer.extend(data)
+    packets = []
+    while len(buffer) >= 2:
+        if buffer[0] != 0x55 or buffer[1] not in (0x61, 0x71):
+            del buffer[0]
+            continue
+        if len(buffer) < 20:
+            break
+        packet = bytes(buffer[:20])
+        del buffer[:20]
+        if packet[1] == 0x61:
+            packets.append(packet)
+    if not packets:
+        return
+
+    sample_interval = 1 / CONFIG["sample_rate_hz"]
+    timestamp_s = imu_state["last_sample_time_s"]
+    if timestamp_s is None:
+        timestamp_s = 0.0
+    last_timestamp_s = timestamp_s + len(packets) * sample_interval
+    receive_time = time.monotonic()
+    with imu_state["lock"]:
+        clock_offset = imu_state["clock_offset_s"]
+        # Default packets have no device timestamp; reset the window after a large timing error.
+        if clock_offset is None or abs(clock_offset + last_timestamp_s - receive_time) > 0.25:
+            imu_state["samples"].clear()
+            imu_state["clock_offset_s"] = receive_time - last_timestamp_s
+        else:
+            # Follow slow clock drift without moving consecutive samples backwards.
+            timing_error = receive_time - (clock_offset + last_timestamp_s)
+            max_adjustment = sample_interval / 2
+            adjustment = max(-max_adjustment, min(max_adjustment, timing_error * 0.1))
+            imu_state["clock_offset_s"] += adjustment
+    for index, packet in enumerate(packets):
+        sample_time_s = timestamp_s + (index + 1) * sample_interval
+        payload = decode_packet(packet, sample_time_s)
+        if not add_sample(imu_state, payload):
+            raise ValueError("Invalid or out-of-order IMU sample.")
 
 
 def add_sample(imu_state: dict, payload: dict) -> bool:
@@ -64,14 +118,15 @@ def add_sample(imu_state: dict, payload: dict) -> bool:
         return False
     receive_time = time.monotonic()
     with imu_state["lock"]:
-        previous_time = imu_state["last_device_time_s"]
+        previous_time = imu_state["last_sample_time_s"]
         if previous_time is not None and sample["timestamp_s"] <= previous_time:
             return False
         if imu_state["clock_offset_s"] is None:
             imu_state["clock_offset_s"] = receive_time - sample["timestamp_s"]
         sample["sample_monotonic"] = sample["timestamp_s"] + imu_state["clock_offset_s"]
         imu_state["samples"].append(sample)
-        imu_state["last_device_time_s"] = sample["timestamp_s"]
+        imu_state["last_sample_time_s"] = sample["timestamp_s"]
+        imu_state["received_samples"] += 1
         imu_state["error"] = None
     return True
 
@@ -80,9 +135,10 @@ def _read_bluetooth(imu_state: dict) -> None:
     try:
         asyncio.run(_receive_bluetooth(imu_state))
     except Exception as error:
+        message = str(error) or type(error).__name__
         with imu_state["lock"]:
-            imu_state["error"] = str(error)
-        print(f"IMU Bluetooth error: {error}")
+            imu_state["error"] = message
+        print(f"IMU Bluetooth error: {message}")
 
 
 async def _receive_bluetooth(imu_state: dict) -> None:
@@ -90,9 +146,7 @@ async def _receive_bluetooth(imu_state: dict) -> None:
 
     def on_data(sender, data):
         try:
-            payload = decode_packet(data)
-            if not add_sample(imu_state, payload):
-                raise ValueError("Invalid or out-of-order IMU sample.")
+            receive_data(imu_state, data)
         except ValueError as error:
             with imu_state["lock"]:
                 changed = imu_state["error"] != str(error)
@@ -100,12 +154,29 @@ async def _receive_bluetooth(imu_state: dict) -> None:
             if changed:
                 print(f"IMU packet error: {error}")
 
-    client = BleakClient(CONFIG["device_address"], timeout=3)
+    rate_codes = {10: 0x06, 20: 0x07, 50: 0x08, 100: 0x09, 200: 0x0B}
+    if CONFIG["sample_rate_hz"] not in rate_codes:
+        raise ValueError("Set sample_rate_hz to 10, 20, 50, 100, or 200.")
+    client = BleakClient(CONFIG["device_address"], timeout=10)
     try:
-        await asyncio.wait_for(client.connect(), timeout=3)
+        print(f"Connecting to IMU {CONFIG['device_address']}...")
+        await asyncio.wait_for(client.connect(), timeout=10)
+        commands = [
+            bytes.fromhex("FF AA 69 88 B5"),
+            bytes([0xFF, 0xAA, 0x03, rate_codes[CONFIG["sample_rate_hz"]], 0x00]),
+            bytes.fromhex("FF AA 1F 03 00"),
+        ]
+        for command in commands:
+            if imu_state["stop_event"].is_set():
+                return
+            await asyncio.wait_for(
+                client.write_gatt_char(CONFIG["write_uuid"], command, response=True), timeout=3
+            )
+            await asyncio.sleep(0.2)
         if imu_state["stop_event"].is_set():
             return
         await asyncio.wait_for(client.start_notify(CONFIG["notify_uuid"], on_data), timeout=3)
+        print(f"IMU connected: output={CONFIG['sample_rate_hz']} Hz, bandwidth=42 Hz.")
         while not imu_state["stop_event"].is_set():
             if not client.is_connected:
                 raise RuntimeError("IMU Bluetooth connection was lost.")
@@ -209,6 +280,38 @@ def stop_imu(imu_state: dict) -> None:
     imu_state["stop_event"].set()
     thread = imu_state["thread"]
     if thread is not None and thread.ident is not None:
-        thread.join(timeout=6)
+        thread.join(timeout=15)
         if thread.is_alive():
             raise RuntimeError("IMU Bluetooth thread did not stop.")
+
+
+if __name__ == "__main__":
+    state = start_imu()
+    previous_count = 0
+    previous_time = time.monotonic()
+    try:
+        while True:
+            time.sleep(1)
+            now = time.monotonic()
+            samples = get_window(state, now)
+            with state["lock"]:
+                count = state["received_samples"]
+                error = state["error"]
+            if error is not None:
+                raise RuntimeError(error)
+            rate = (count - previous_count) / (now - previous_time)
+            previous_count = count
+            previous_time = now
+            if not samples:
+                print(f"Waiting for recent IMU samples. received_rate_hz={rate:.1f}")
+                continue
+            latest = samples[-1]
+            output = {"received_rate_hz": round(rate, 1), "window_samples": len(samples)}
+            for key in ("ax", "ay", "az", "gx", "gy", "gz"):
+                output[key] = round(latest[key], 4)
+            output.update(analyze_samples(samples))
+            print(json.dumps(output))
+    except KeyboardInterrupt:
+        print("Stopping IMU.")
+    finally:
+        stop_imu(state)
