@@ -15,6 +15,51 @@ CONFIG = {
 }
 
 
+SURFACE_METADATA_FIELDS = (
+    "area_accept_ratio", "material_accept_ratio", "model_version", "policy_version",
+)
+# Recheck after restarting the uploader once the remote migration is applied.
+_LEGACY_SCHEMA_URLS = set()
+
+
+def _post_batch(batch, url, headers, api_key):
+    while True:
+        if url in _LEGACY_SCHEMA_URLS:
+            batch = [{key: value for key, value in row.items()
+                      if key not in SURFACE_METADATA_FIELDS} for row in batch]
+        body = json.dumps(batch, allow_nan=False).encode("utf-8")
+        request = Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urlopen(request, timeout=CONFIG["timeout_s"]) as response:
+                response.read()
+            return
+        except HTTPError as error:
+            message = error.read().decode("utf-8", errors="replace")
+            try:
+                details = json.loads(message)
+            except ValueError:
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            missing_metadata = (
+                error.code == 400
+                and details.get("code") in ("PGRST204", "42703")
+                and any(field in str(details.get("message", ""))
+                        for field in SURFACE_METADATA_FIELDS)
+                and any(field in row for row in batch for field in SURFACE_METADATA_FIELDS)
+            )
+            if url not in _LEGACY_SCHEMA_URLS and missing_metadata:
+                _LEGACY_SCHEMA_URLS.add(url)
+                print("Supabase table lacks surface metadata columns; uploading legacy fields. "
+                      "Full metadata remains in SQLite. Apply supabase_surface_metadata.sql "
+                      "and restart to upload all fields.")
+                continue
+            message = message.replace(api_key, "[redacted]")[:500]
+            raise RuntimeError(f"Supabase upload failed (HTTP {error.code}): {message}") from None
+        except URLError as error:
+            raise RuntimeError(f"Cannot reach Supabase: {error.reason}") from None
+
+
 def read_records(db_path):
     database_path = Path(db_path).expanduser().resolve()
     if not database_path.is_file():
@@ -65,17 +110,7 @@ def upload_records(records, supabase_url, api_key):
             cloud_record = dict(record)
             cloud_record["source_id"] = cloud_record.pop("id")
             batch.append(cloud_record)
-        body = json.dumps(batch, allow_nan=False).encode("utf-8")
-        request = Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urlopen(request, timeout=CONFIG["timeout_s"]) as response:
-                response.read()
-        except HTTPError as error:
-            message = error.read().decode("utf-8", errors="replace")
-            message = message.replace(api_key, "[redacted]")[:500]
-            raise RuntimeError(f"Supabase upload failed (HTTP {error.code}): {message}") from None
-        except URLError as error:
-            raise RuntimeError(f"Cannot reach Supabase: {error.reason}") from None
+        _post_batch(batch, url, headers, api_key)
         uploaded += len(batch)
         print(f"Uploaded {uploaded}/{len(records)} records.")
     return uploaded

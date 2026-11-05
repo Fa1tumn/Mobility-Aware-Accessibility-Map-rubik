@@ -1,5 +1,7 @@
 """Verify cloud ID allocation requests without sending network traffic."""
+import io
 import json
+from urllib.error import HTTPError
 import unittest
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import MagicMock, patch
@@ -38,6 +40,67 @@ class CloudIdTests(unittest.TestCase):
             upload_supabase.upload_records(records, 'https://example.supabase.co', 'test-key')
             self.assertEqual(first, [call.args[0].data for call in request.call_args_list])
             self.assertEqual([len(json.loads(body)) for body in first], [2, 1])
+
+
+class LegacySurfaceSchemaTests(unittest.TestCase):
+    def setUp(self):
+        self.cache = patch.object(upload_supabase, "_LEGACY_SCHEMA_URLS", set())
+        self.cache.start()
+        self.addCleanup(self.cache.stop)
+
+    def response(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        return response
+
+    def error(self, code, message, status=400):
+        return HTTPError("https://example.supabase.co", status, "error", {},
+                         io.BytesIO(json.dumps({"code": code, "message": message}).encode()))
+
+    def test_missing_metadata_retries_and_caches_without_changing_records(self):
+        records = [{"id": 1, "record_time": "2026-11-05T00:00:00Z",
+                    "surface_label": "cement", "surface_confidence": 0.9,
+                    **dict.fromkeys(upload_supabase.SURFACE_METADATA_FIELDS, None)}]
+        original = json.dumps(records, sort_keys=True)
+        for code, message in (
+            ("PGRST204", "Could not find the 'area_accept_ratio' column in the schema cache"),
+            ("42703", "column observations.area_accept_ratio does not exist"),
+        ):
+            with self.subTest(code=code):
+                upload_supabase._LEGACY_SCHEMA_URLS.clear()
+                with patch.object(upload_supabase, "urlopen", side_effect=[
+                    self.error(code, message), self.response(), self.response()
+                ]) as request:
+                    self.assertEqual(upload_supabase.upload_records(records, "https://example.supabase.co", "key"), 1)
+                    upload_supabase.upload_records(records, "https://example.supabase.co", "key")
+                sent = [json.loads(call.args[0].data)[0] for call in request.call_args_list]
+                self.assertIn("area_accept_ratio", sent[0])
+                for row in sent[1:]:
+                    self.assertTrue(set(upload_supabase.SURFACE_METADATA_FIELDS).isdisjoint(row))
+                    self.assertEqual(row["source_id"], 1)
+                    self.assertEqual(row["surface_label"], "cement")
+                self.assertEqual(json.dumps(records, sort_keys=True), original)
+
+    def test_other_upload_errors_are_not_silenced(self):
+        records = [{"id": 1, "area_accept_ratio": 0.5}]
+        for code, message, status in (
+            ("PGRST204", "Could not find the 'source_id' column", 400),
+            ("42501", "permission denied", 403),
+        ):
+            with self.subTest(code=code), patch.object(upload_supabase, "urlopen", side_effect=
+                    self.error(code, message, status)) as request:
+                with self.assertRaises(RuntimeError):
+                    upload_supabase.upload_records(records, "https://example.supabase.co", "key")
+                self.assertEqual(request.call_count, 1)
+                self.assertFalse(upload_supabase._LEGACY_SCHEMA_URLS)
+
+    def test_current_schema_keeps_all_metadata(self):
+        record = {"id": 1, "model_version": "v3", "area_accept_ratio": 0.5}
+        with patch.object(upload_supabase, "urlopen", return_value=self.response()) as request:
+            upload_supabase.upload_records([record], "https://example.supabase.co", "key")
+        sent = json.loads(request.call_args.args[0].data)[0]
+        self.assertEqual(sent["model_version"], "v3")
+        self.assertEqual(sent["area_accept_ratio"], 0.5)
 
 
 if __name__ == '__main__':

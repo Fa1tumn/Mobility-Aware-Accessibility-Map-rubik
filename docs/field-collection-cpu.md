@@ -102,3 +102,10 @@ ALTER TABLE public.observations
   ADD COLUMN IF NOT EXISTS model_version          text,
   ADD COLUMN IF NOT EXISTS policy_version         text;
 ```
+
+For an existing Supabase table, the uploader detects missing surface-metadata
+columns and retries with the legacy fields. Full metadata remains in SQLite;
+the fallback is remembered for that endpoint until the process restarts.
+Apply `supabase_surface_metadata.sql`, restart collection, then rerun
+`python3 upload_supabase.py` to backfill metadata from saved local records.
+Other upload errors still stop the batch and remain eligible for retry.
