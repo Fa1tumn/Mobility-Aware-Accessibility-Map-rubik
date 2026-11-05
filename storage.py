@@ -19,6 +19,10 @@ def open_database():
                 longitude REAL,
                 surface_label TEXT,
                 surface_confidence REAL,
+                area_accept_ratio REAL,
+                material_accept_ratio REAL,
+                model_version TEXT,
+                policy_version TEXT,
                 slope_percent REAL,
                 vibration_frequency_avg_hz REAL,
                 objects_supported INTEGER,
@@ -28,9 +32,13 @@ def open_database():
         columns = []
         for row in cursor.execute("PRAGMA table_info(observations)"):
             columns.append(row[1])
-        for name in ("slope_percent", "vibration_frequency_avg_hz"):
+        for name in ("slope_percent", "vibration_frequency_avg_hz",
+                     "area_accept_ratio", "material_accept_ratio"):
             if name not in columns:
                 cursor.execute(f"ALTER TABLE observations ADD COLUMN {name} REAL")
+        for name in ("model_version", "policy_version"):
+            if name not in columns:
+                cursor.execute(f"ALTER TABLE observations ADD COLUMN {name} TEXT")
         connection.commit()
         cursor.close()
     except Exception:
@@ -54,17 +62,25 @@ def save_record(connection, record: dict) -> int:
                 longitude,
                 surface_label,
                 surface_confidence,
+                area_accept_ratio,
+                material_accept_ratio,
+                model_version,
+                policy_version,
                 slope_percent,
                 vibration_frequency_avg_hz,
                 objects_supported,
                 objects
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record["record_time"],
             record["latitude"],
             record["longitude"],
             record["surface_label"],
             record["surface_confidence"],
+            record.get("area_accept_ratio"),
+            record.get("material_accept_ratio"),
+            record.get("model_version"),
+            record.get("policy_version"),
             record.get("slope_percent"),
             record.get("vibration_frequency_avg_hz"),
             record["objects_supported"],

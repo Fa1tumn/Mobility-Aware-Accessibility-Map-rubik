@@ -7,7 +7,6 @@ import random
 import sqlite3
 import struct
 import tempfile
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import cv2
@@ -18,6 +17,7 @@ import inference
 import main
 import phone
 import storage
+import surface_model
 import vision
 
 
@@ -89,37 +89,62 @@ def inject_imu(imu_state, case, frame_monotonic):
         imu.receive_data(imu_state, stream[11:])
 
 
-def simulate_qnn(command, case):
-    input_list = Path(command[command.index("--input_list") + 1])
-    tensor = np.fromfile(input_list.parent / "image.raw", dtype=np.float32)
-    assert tensor.size == 3 * 640 * 640
-    assert np.isfinite(tensor).all()
-    assert np.allclose(tensor, case["image_brightness"] / 255, atol=1 / 255)
-    output_dir = Path(command[command.index("--output_dir") + 1]) / "Result_0"
-    output_dir.mkdir(parents=True)
-    for index, (name, shape) in enumerate(inference.OUTPUT_SHAPES.items()):
-        values = np.zeros(shape, dtype=np.float32)
-        if name == "boxes":
-            values[0, 0] = [320, 320, 640, 640]
-        elif name == "class_scores":
-            class_id = inference.LABELS.index(case["surface_label"])
-            values[0, 0, class_id] = case["surface_confidence"]
-        elif name == "mask_coefficients":
-            values[0, 0, 0] = 1.0
-        elif name == "prototypes":
-            values[0, :, :, 0] = 1.0
-        values.tofile(output_dir / f"output_{index}.raw")
-    return SimpleNamespace(returncode=0, stdout="", stderr="")
+def _logits_for_class(num_classes, height, width, class_id, confidence):
+    """Build [1, C, H, W] logits whose softmax yields `confidence` for class_id
+    uniformly across every pixel. Solve for the winning logit l given the rest
+    at 0: confidence = e^l / (e^l + (C-1)), so l = ln((C-1) * p / (1 - p))."""
+    probability = min(max(float(confidence), 1e-6), 1 - 1e-6)
+    winning_logit = math.log((num_classes - 1) * probability / (1 - probability))
+    logits = np.zeros((1, num_classes, height, width), dtype=np.float32)
+    logits[0, class_id, :, :] = winning_logit
+    return logits
 
 
-def inject_inference(image, case, model_path):
-    def qnn_output(command, **kwargs):
-        return simulate_qnn(command, case)
+class FakeBackend(surface_model.Backend):
+    """Returns pre-built logits so tests control the surface decision without
+    a real NPU. Mirrors the swappable-backend design of surface_model."""
 
-    models = {"seg_model": model_path, "object_model": None}
-    with patch.object(inference.subprocess, "run", side_effect=qnn_output) as qnn:
+    def __init__(self, logits, counter):
+        self.logits = logits
+        self.counter = counter
+
+    def run(self, input_tensor):
+        # Confirm the adapter feeds a normalized [1, 3, H, W] float32 tensor.
+        assert input_tensor.dtype == np.float32
+        assert input_tensor.shape[:2] == (1, 3)
+        assert np.isfinite(input_tensor).all()
+        self.counter.append(1)
+        return self.logits
+
+
+def build_fake_surface_model(case):
+    """A SurfaceModel whose two heads vote the case's surface everywhere, so the
+    Area sidewalk + Material thresholds both pass and surface_label matches."""
+    spec = surface_model.load_spec()
+    _, _, height, width = spec["input_shape"]
+    area_labels = spec["models"]["area"]["labels"]
+    material_labels = spec["models"]["material"]["labels"]
+    sidewalk_id = area_labels.index("sidewalk")
+    material_id = material_labels.index(case["surface_label"])
+    # Area votes sidewalk at a high fixed confidence; Material votes the case
+    # class at the case confidence. Both are >= 0.8 so the whole frame is kept.
+    area_logits = _logits_for_class(len(area_labels), height, width, sidewalk_id, 0.95)
+    material_logits = _logits_for_class(
+        len(material_labels), height, width, material_id, case["surface_confidence"]
+    )
+    calls = []
+    model = surface_model.SurfaceModel(
+        FakeBackend(area_logits, calls), FakeBackend(material_logits, calls), spec
+    )
+    return model, calls
+
+
+def inject_inference(image, case):
+    model, calls = build_fake_surface_model(case)
+    with patch.object(inference, "load_models", return_value={"surface": model}):
+        models = inference.load_models()
         result = inference.analyze_image(image, models)
-    assert qnn.call_count == 1
+    assert len(calls) == 2  # Area then Material ran on the same frame.
     return result
 
 
@@ -138,13 +163,18 @@ def check_record(record, case, frame):
     assert record["latitude"] == case["latitude"]
     assert record["longitude"] == case["longitude"]
     assert record["surface_label"] == case["surface_label"]
-    assert abs(record["surface_confidence"] - case["surface_confidence"]) < 0.000001
+    assert abs(record["surface_confidence"] - case["surface_confidence"]) < 0.001
+    # Whole frame votes sidewalk material, so both acceptance ratios are ~1.0.
+    assert abs(record["area_accept_ratio"] - 1.0) < 0.001
+    assert abs(record["material_accept_ratio"] - 1.0) < 0.001
+    assert record["model_version"] == "lraspp_mobilenet_v3_large:area_e7+material_e10"
+    assert record["policy_version"] == "area_sidewalk>=0.8&material>=0.8"
     assert abs(record["slope_percent"] - case["slope_percent"]) < 0.1
     assert abs(record["vibration_frequency_avg_hz"] - case["vibration_frequency_hz"]) < 0.1
     assert record["objects_supported"] == 0 and record["objects"] is None
 
 
-def test_full_pipeline(database_path, model_path):
+def test_full_pipeline(database_path):
     print("\nSTAGE 1: run the full pipeline once")
     case = {
         "latitude": 37.5, "longitude": 127.0, "accuracy_m": 4.0,
@@ -167,20 +197,16 @@ def test_full_pipeline(database_path, model_path):
         inject_imu(imu_state, case, frame["frame_monotonic"])
         camera["frames"].put(frame)
 
-        def qnn_output(command, **kwargs):
-            return simulate_qnn(command, case)
-
-        models = {"seg_model": model_path, "object_model": None}
+        fake_model, inference_calls = build_fake_surface_model(case)
         with patch.dict(storage.CONFIG, {"db_path": str(database_path)}), \
              patch.dict(imu.CONFIG, {"mounting_calibrated": True}), \
-             patch.object(inference, "load_models", return_value=models), \
-             patch.object(inference.subprocess, "run", side_effect=qnn_output) as qnn, \
+             patch.object(inference, "load_models", return_value={"surface": fake_model}), \
              patch.object(phone, "start_phone", return_value=phone_state), \
              patch.object(imu, "start_imu", return_value=imu_state), \
              patch.object(vision, "open_camera", return_value=camera), \
              patch.object(main.time, "sleep", side_effect=KeyboardInterrupt):
             main.main()
-        assert qnn.call_count == 1
+        assert len(inference_calls) == 2  # Area + Material ran once each.
         records = read_records(database_path)
         assert len(records) == 2
         assert records[0]["record_time"] == "old"
@@ -198,7 +224,7 @@ def test_full_pipeline(database_path, model_path):
     print("STAGE 1: PASS - main loop, module connections, migration, save, and cleanup.")
 
 
-def test_module_case(case, connection, database_path, model_path):
+def test_module_case(case, connection, database_path):
     print(f"\nCASE {case['case_number']}: module inputs")
     print(json.dumps(case, indent=2))
     phone_state = None
@@ -233,10 +259,10 @@ def test_module_case(case, connection, database_path, model_path):
         assert imu.analyze_samples([]) == {"slope_percent": None, "vibration_frequency_avg_hz": None}
         print("imu.py: 200 binary BLE packets -> metrics", json.dumps(imu_result))
 
-        result = inject_inference(frame["image"], case, model_path)
+        result = inject_inference(frame["image"], case)
         assert result["surface_label"] == case["surface_label"]
-        assert abs(result["surface_confidence"] - case["surface_confidence"]) < 0.000001
-        print("inference.py: BGR + simulated QNN outputs -> surface", json.dumps(result))
+        assert abs(result["surface_confidence"] - case["surface_confidence"]) < 0.001
+        print("inference.py: BGR + Area/Material logits -> surface", json.dumps(result))
 
         record = main.combine_data(frame, gps, result, imu_result)
         assert record is not None
@@ -254,7 +280,7 @@ def test_module_case(case, connection, database_path, model_path):
     print(f"CASE {case['case_number']}: PASS - all module outputs combined and saved.")
 
 
-def test_module_integration(database_path, model_path):
+def test_module_integration(database_path):
     print("\nSTAGE 2: inject data into each module, then combine the outputs")
     generator = random.Random(42)
     with patch.dict(storage.CONFIG, {"db_path": str(database_path)}):
@@ -267,17 +293,34 @@ def test_module_integration(database_path, model_path):
                 "longitude": round(generator.uniform(126.99, 127.01), 6),
                 "accuracy_m": round(generator.uniform(1.0, 8.0), 1),
                 "surface_label": generator.choice(inference.LABELS),
-                "surface_confidence": round(generator.uniform(0.75, 0.99), 2),
+                # Keep confidence clear of the 0.8 policy threshold (avoiding
+                # float32 boundary flicker) so the material is accepted and
+                # surface_label is preserved.
+                "surface_confidence": round(generator.uniform(0.82, 0.99), 2),
                 "slope_percent": round(generator.uniform(-12.0, 12.0), 1),
                 "vibration_frequency_hz": generator.randint(4, 18),
                 "image_brightness": generator.randint(30, 220),
             }
-            test_module_case(case, connection, database_path, model_path)
+            test_module_case(case, connection, database_path)
         assert len(read_records(database_path)) == 5
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         storage.close_database(connection)
     print("STAGE 2: PASS - 5/5 module integrations.")
+
+
+def test_policy_rejects_low_confidence():
+    """Material below the 0.8 threshold yields unknown, not a stored label."""
+    image = np.full((24, 32, 3), 128, dtype=np.uint8)
+    low = inject_inference(image, {"surface_label": "cement", "surface_confidence": 0.5})
+    assert low["surface_label"] == "unknown"
+    assert low["surface_confidence"] is None
+    assert low["area_accept_ratio"] == 1.0          # Area (0.95) still passes.
+    assert low["material_accept_ratio"] == 0.0       # Material gate rejects all.
+    high = inject_inference(image, {"surface_label": "cement", "surface_confidence": 0.9})
+    assert high["surface_label"] == "cement"
+    assert abs(high["material_accept_ratio"] - 1.0) < 0.001
+    print("POLICY: PASS - material below 0.8 -> unknown; at/above -> accepted.")
 
 
 def test_imu_clock_drift():
@@ -307,14 +350,15 @@ def test_imu_clock_drift():
 
 def run_test():
     saved_database_path = Path(__file__).resolve().with_name("test_observations.sqlite3")
-    print("Mode: software test; device input, model loading, and QNN execution are simulated.")
-    print("HTTP, camera pipe reading, IMU calculations, inference processing, and SQLite are real.")
+    print("Mode: software test; device input and the NPU/model backends are simulated.")
+    print("HTTP, camera pipe reading, IMU calculations, the Area+Material adapter, and SQLite are real.")
     test_imu_clock_drift()
+    test_policy_rejects_low_confidence()
     with tempfile.TemporaryDirectory(prefix="rubik-pipeline-test-") as directory:
         smoke_database_path = Path(directory) / "smoke.sqlite3"
         integration_database_path = Path(directory) / "integration.sqlite3"
-        model_path = Path(directory) / "surface.bin"
-        model_path.write_bytes(b"simulated-model")
+        # Legacy schema without the IMU/area/material columns, to exercise the
+        # automatic column migration in storage.open_database().
         connection = sqlite3.connect(smoke_database_path)
         try:
             connection.execute("""CREATE TABLE observations (
@@ -326,8 +370,8 @@ def run_test():
             connection.commit()
         finally:
             connection.close()
-        test_full_pipeline(smoke_database_path, model_path)
-        test_module_integration(integration_database_path, model_path)
+        test_full_pipeline(smoke_database_path)
+        test_module_integration(integration_database_path)
         connection = sqlite3.connect(integration_database_path)
         saved_connection = sqlite3.connect(saved_database_path)
         try:
