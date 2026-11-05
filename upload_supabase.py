@@ -26,7 +26,8 @@ def read_records(db_path):
         records = []
         for row in rows:
             record = dict(row)
-            record["objects_supported"] = bool(record["objects_supported"])
+            if record["objects_supported"] is not None:
+                record["objects_supported"] = bool(record["objects_supported"])
             if record["objects"] is not None:
                 record["objects"] = json.loads(record["objects"])
             records.append(record)
@@ -45,19 +46,25 @@ def upload_records(records, supabase_url, api_key):
         raise ValueError("Use the project URL or the REST API base URL ending in /rest/v1.")
     if not api_key:
         raise ValueError("Set SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY.")
-    query = urlencode({"on_conflict": "id,record_time"})
+    query = urlencode({"on_conflict": "source_id,record_time"})
     url = f"https://{parts.netloc}/rest/v1/{CONFIG['table']}?{query}"
     print(f"Upload endpoint: {url}")
     headers = {
         "apikey": api_key,
         "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=minimal",
+        "Prefer": "resolution=merge-duplicates,return=minimal,missing=default",
     }
     if api_key.startswith("eyJ"):
         headers["Authorization"] = f"Bearer {api_key}"
     uploaded = 0
     for start in range(0, len(records), CONFIG["batch_size"]):
-        batch = records[start:start + CONFIG["batch_size"]]
+        # SQLite IDs identify source observations, not rows in the cloud table.
+        # Omit cloud id so PostgreSQL allocates it; keep a stable retry key.
+        batch = []
+        for record in records[start:start + CONFIG["batch_size"]]:
+            cloud_record = dict(record)
+            cloud_record["source_id"] = cloud_record.pop("id")
+            batch.append(cloud_record)
         body = json.dumps(batch, allow_nan=False).encode("utf-8")
         request = Request(url, data=body, headers=headers, method="POST")
         try:

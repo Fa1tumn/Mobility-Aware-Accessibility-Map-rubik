@@ -1,6 +1,6 @@
 # Mobility-Aware-Accessibility-Map-rubik
 
-Each camera frame can produce one database record. The phone supplies GPS only; a separate IMU supplies motion samples. `main.py` collects the frame, GPS and IMU window, runs surface inference, combines their outputs, and asks `storage.py` to save the record.
+Each collection iteration produces one database record, with null fields for unavailable devices. The phone supplies GPS only; a separate IMU supplies motion samples. `main.py` collects the frame, GPS and IMU window, runs surface inference, combines their outputs, and asks `storage.py` to save the record.
 
 ## Data flow
 
@@ -224,7 +224,7 @@ Keep `mounting_calibrated` false until the sensor is fixed to the platform with 
 
 ## Upload to Supabase
 
-The uploader runs separately: SQLite -> JSON batches -> HTTPS POST -> Supabase. It reads a snapshot of all local records without changing SQLite. Each run upserts by `(id, record_time)`, so sending the same records again updates them. A failure stops the upload; rerun after fixing the error. It uses the Python standard library.
+The standalone uploader can send saved records separately: SQLite -> JSON batches -> HTTPS POST -> Supabase. `main.py` can also upload each saved observation when an explicit Supabase URL and key are configured (see below). It reads a snapshot of all local records without changing SQLite. Each run upserts by `(source_id, record_time)`, so sending the same records again updates them. A failure stops the upload; rerun after fixing the error. It uses the Python standard library.
 
 | Function | Input -> output |
 | --- | --- |
@@ -236,11 +236,12 @@ Get the project URL from the Supabase dashboard's Data API/Connect screen and a 
 
 `SUPABASE_URL` accepts either `https://your-project.supabase.co` or `https://your-project.supabase.co/rest/v1/`. The uploader builds `/rest/v1/observations` once and prints the destination URL. HTTP 404 with `PGRST125` means the request path is invalid; check for a repeated `/rest/v1` or a table name appended to the configured base URL.
 
-For a new destination table, run this once in the Supabase SQL Editor. The script expects these columns and the composite primary key. An existing table needs the same schema; `CREATE TABLE IF NOT EXISTS` leaves an existing schema unchanged.
+For a new destination table, run this once in the Supabase SQL Editor. The script expects these columns and the unique `(source_id, record_time)` key. An existing table needs the same schema; `CREATE TABLE IF NOT EXISTS` leaves an existing schema unchanged.
 
 ```sql
 CREATE TABLE IF NOT EXISTS public.observations (
-    id bigint NOT NULL,
+    id bigserial PRIMARY KEY,
+    source_id bigint NOT NULL,
     record_time timestamptz NOT NULL,
     latitude double precision,
     longitude double precision,
@@ -248,12 +249,13 @@ CREATE TABLE IF NOT EXISTS public.observations (
     surface_confidence double precision,
     slope_percent double precision,
     vibration_frequency_avg_hz double precision,
-    objects_supported boolean NOT NULL DEFAULT false,
+    objects_supported boolean DEFAULT false,
     objects jsonb,
-    PRIMARY KEY (id, record_time)
+    UNIQUE (source_id, record_time)
 );
 ALTER TABLE public.observations ENABLE ROW LEVEL SECURITY;
 GRANT SELECT, INSERT, UPDATE ON public.observations TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.observations_id_seq TO service_role;
 ```
 
 Enable the project's Data API with the `public` schema exposed. In a Bash terminal, set the URL, enter the key at the hidden prompt, and upload the five sample records:
@@ -266,4 +268,26 @@ printf '\n'
 python3 upload_supabase.py test_observations.sqlite3
 ```
 
-For collected observations, run `python3 upload_supabase.py` (default: `observations.sqlite3`). A successful sample upload prints `Uploaded 5/5 records.` and `Upload complete: 5 records sent to observations.` SQLite `0` becomes JSON `false`; `NULL` stays JSON `null`. The local IDs and all observation fields are preserved. `CONFIG` in the script sets the table, batch size and timeout. Query the destination with `SELECT * FROM public.observations ORDER BY record_time, id;`.
+For collected observations, run `python3 upload_supabase.py` (default: `observations.sqlite3`). A successful sample upload prints `Uploaded 5/5 records.` and `Upload complete: 5 records sent to observations.` SQLite `0` becomes JSON `false`; `NULL` stays JSON `null`. Local IDs are sent as `source_id`; Supabase generates the cloud `id`. Uploading the same `(source_id, record_time)` again updates the existing row without changing its cloud ID. IDs increase but may have gaps after retries. `CONFIG` in the script sets the table, batch size and timeout. Query the destination with `SELECT * FROM public.observations ORDER BY record_time, id;`.
+
+### Partial device failures and automatic uploads
+
+`main.py` keeps collecting when camera, GPS, IMU startup/read, or image inference fails. Only the affected fields become SQL `NULL` / JSON `null`. Missing, stale, or inaccurate GPS clears the coordinates without dropping the observation. Without a camera frame, the observation uses the current UTC time and IMU/GPS are aligned to the current monotonic time. Devices that fail to start remain unavailable until the next run; reads and inference are attempted again each iteration.
+
+Set `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`) as described above, then run `python3 main.py`. Each observation is committed to SQLite before upload. Upload failures are retried on the next iteration; after a restart, use `python3 upload_supabase.py` to upload any saved backlog. Without an explicit URL and key, collection continues locally with a startup message.
+
+For existing Supabase tables, allow an unavailable camera/inference output to be null:
+
+```sql
+ALTER TABLE public.observations ALTER COLUMN objects_supported DROP NOT NULL;
+```
+
+### Supabase IDs across restarts
+
+The cloud `id` is allocated by a PostgreSQL sequence, independently of SQLite. The uploader omits `id` and sends the local ID as `source_id`. Even if a fresh local database starts again at 1, observations with a different `record_time` receive new cloud IDs. The `(source_id, record_time)` unique key prevents duplicate rows on upload retries.
+
+Before running the updated uploader against an existing table, stop collection/upload processes and run **`supabase_cloud_ids.sql`** in the Supabase SQL Editor. It preserves all observations, copies old IDs into `source_id`, and assigns new IDs only to existing rows with duplicate IDs (the earliest row for each ID keeps it). Existing foreign keys or external references to duplicate IDs require review before migration. The sequence continues above the current maximum. This migration has not been applied to your remote database.
+
+After migration, restart `main.py` and sort the Supabase table by `id` ascending to inspect newly allocated IDs. Local `Saved record ...` log IDs remain SQLite IDs; they can differ from cloud IDs. IDs are unique and increasing, not guaranteed to be consecutive.
+
+PostgreSQL sequence allocation can leave gaps after retries; see the [PostgreSQL sequence documentation](https://www.postgresql.org/docs/current/functions-sequence.html). The upload request uses a unique conflict key as described in the [PostgREST upsert documentation](https://docs.postgrest.org/en/stable/references/api/tables_views.html#upsert).
