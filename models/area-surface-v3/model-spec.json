@@ -1,0 +1,62 @@
+{
+  "architecture": "lraspp_mobilenet_v3_large",
+  "format": "ONNX",
+  "precision": "FP32",
+  "input_name": "image",
+  "input_shape": [
+    1,
+    3,
+    360,
+    640
+  ],
+  "color_order": "RGB",
+  "normalization": {
+    "scale": 0.00392156862745098,
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "models": {
+    "area": {
+      "path": "area-best-640x360.onnx",
+      "epoch": 7,
+      "labels": [
+        "unannotated_background",
+        "sidewalk",
+        "roadway",
+        "alley",
+        "bike_lane",
+        "braille_guide_blocks",
+        "caution_zone"
+      ]
+    },
+    "material": {
+      "path": "material-epoch10-640x360.onnx",
+      "epoch": 10,
+      "labels": [
+        "blocks",
+        "cement",
+        "asphalt",
+        "urethane",
+        "soil_stone",
+        "other"
+      ]
+    }
+  },
+  "policy": {
+    "area_sidewalk_threshold": 0.8,
+    "material_threshold": 0.8,
+    "stairs_enabled": false,
+    "damage_enabled": false
+  },
+  "npu_compiled": false,
+  "rubik_pi_validated": false,
+  "note": "Paths relative to this file. Model metadata only; existing YOLO inference.py will need an adapter."
+}
