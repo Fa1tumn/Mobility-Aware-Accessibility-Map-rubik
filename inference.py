@@ -54,6 +54,10 @@ def load_models() -> dict:
     return {"surface": model}
 
 
-def analyze_image(image, models: dict) -> dict:
-    """BGR frame + loaded models -> combined surface observation dict."""
-    return models["surface"].analyze(image)
+def analyze_image(image, models: dict, timing: bool = False) -> dict:
+    """BGR frame + loaded models -> combined surface observation dict.
+
+    With timing=True the result includes a 'timing_ms' breakdown of the
+    preprocess/area/material/postprocess split for on-device measurement.
+    """
+    return models["surface"].analyze(image, timing=timing)

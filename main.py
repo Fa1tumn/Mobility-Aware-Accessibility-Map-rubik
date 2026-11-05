@@ -10,9 +10,14 @@ import storage
 import upload_supabase
 
 CONFIG = {
-    "interval_s": 1.0,            # Delay after each iteration, not a guaranteed sampling interval.
+    "interval_s": 2.0,            # Target period between records. Sleep is reduced
+                                  # by processing time; if processing already
+                                  # exceeds this, the loop continues immediately
+                                  # and vision.capture_frame hands back the newest
+                                  # frame (the reader keeps only the latest).
     "max_gps_time_diff_s": 1.0,
     "max_gps_accuracy_m": 10.0,
+    "timing": True,               # Log the preprocess/Area/Material/postprocess split.
 }
 
 
@@ -73,7 +78,12 @@ def main() -> None:
         print("Pipeline started. Press Ctrl+C to stop.")
 
         while True:
+            loop_start = time.monotonic()
+            # capture_frame returns the newest decoded frame; a slow iteration
+            # does not build a backlog because the reader keeps only the latest.
             frame = device_output("Camera", vision.capture_frame, camera) if camera is not None else None
+            # The record timestamp is the frame's capture time, not the time
+            # inference finishes, so a slow CPU does not skew observation times.
             reference_monotonic = frame["frame_monotonic"] if frame is not None else time.monotonic()
             # Snapshot GPS before inference so new updates cannot change this record.
             gps = device_output("GPS", phone.get_latest_gps, phone_state) if phone_state is not None else None
@@ -84,10 +94,24 @@ def main() -> None:
                     imu_result = device_output("IMU analysis", imu.analyze_samples, samples)
             result = None
             if frame is not None and models is not None:
-                result = device_output("Image inference", inference.analyze_image, frame["image"], models)
+                result = device_output(
+                    "Image inference", inference.analyze_image, frame["image"], models, CONFIG["timing"]
+                )
+            timing = result.pop("timing_ms", None) if result else None
             record = combine_data(frame, gps, result, imu_result, reference_monotonic)
             record_id = storage.save_record(connection, record)
-            print(f"Saved record {record_id}: time={record['record_time']}, surface={record['surface_label']}")
+            processing_s = time.monotonic() - loop_start
+            timing_note = f", infer={timing['total']}ms" if timing else ""
+            print(
+                f"Saved record {record_id}: time={record['record_time']}, "
+                f"surface={record['surface_label']}{timing_note}, "
+                f"loop={processing_s * 1000:.0f}ms"
+            )
+            if timing:
+                print(
+                    f"  timing_ms: pre={timing['preprocess']} area={timing['area']} "
+                    f"material={timing['material']} post={timing['postprocess']} total={timing['total']}"
+                )
             if upload_enabled:
                 pending_uploads.append({"id": record_id, **record})
                 try:
@@ -97,7 +121,13 @@ def main() -> None:
                     print(f"Supabase upload failed; records remain in SQLite and will be retried next iteration: {message}")
                 else:
                     pending_uploads.clear()
-            time.sleep(CONFIG["interval_s"])
+            # Keep the target period: sleep only for the remaining time. If the
+            # iteration already overran, continue immediately (no backlog).
+            remaining_s = CONFIG["interval_s"] - (time.monotonic() - loop_start)
+            if remaining_s > 0:
+                time.sleep(remaining_s)
+            else:
+                print(f"  Iteration exceeded target {CONFIG['interval_s']}s; processing newest frame next.")
 
     except KeyboardInterrupt:
         print("Ctrl+C received. Stopping.")

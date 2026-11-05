@@ -222,12 +222,38 @@ class SurfaceModel:
             spec,
         )
 
-    def analyze(self, image) -> dict:
-        """BGR frame -> combined surface observation (same frame, in sequence)."""
+    def analyze(self, image, timing: bool = False) -> dict:
+        """BGR frame -> combined surface observation (same frame, in sequence).
+
+        When timing is True, the result carries a 'timing_ms' dict with the
+        preprocess / area / material / postprocess / total wall-clock split,
+        for measuring the on-device CPU cost of the two-model pipeline.
+        """
+        if not timing:
+            input_tensor = preprocess(image, self.spec)
+            area_logits = self.area_backend.run(input_tensor)
+            material_logits = self.material_backend.run(input_tensor)
+            return apply_policy(area_logits, material_logits, self.spec)
+
+        from time import perf_counter
+
+        t0 = perf_counter()
         input_tensor = preprocess(image, self.spec)
+        t1 = perf_counter()
         area_logits = self.area_backend.run(input_tensor)
+        t2 = perf_counter()
         material_logits = self.material_backend.run(input_tensor)
-        return apply_policy(area_logits, material_logits, self.spec)
+        t3 = perf_counter()
+        result = apply_policy(area_logits, material_logits, self.spec)
+        t4 = perf_counter()
+        result["timing_ms"] = {
+            "preprocess": round((t1 - t0) * 1000, 1),
+            "area": round((t2 - t1) * 1000, 1),
+            "material": round((t3 - t2) * 1000, 1),
+            "postprocess": round((t4 - t3) * 1000, 1),
+            "total": round((t4 - t0) * 1000, 1),
+        }
+        return result
 
     def close(self) -> None:
         self.area_backend.close()
