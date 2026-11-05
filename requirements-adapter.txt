@@ -1,0 +1,6 @@
+# PC-side verification of the area-surface-v3 adapter (surface_model.py).
+# The Rubik Pi NPU runtime does not use these; it uses qnn-net-run.
+numpy
+onnxruntime
+opencv-python-headless
+pillow

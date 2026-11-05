@@ -105,7 +105,13 @@ def _read_frames(camera, cv2, np) -> None:
 
 
 def capture_frame(camera):
-    """Return the latest BGR frame, or None on error or a one-second timeout."""
+    """Return the latest BGR frame, or None on error or a one-second timeout.
+
+    The reader thread keeps only the newest frame (queue maxsize=1 with a
+    leaky put), so this already returns the most recent decoded frame rather
+    than a backlog. The frame carries its own capture timestamp, so a record
+    always reflects when the frame was grabbed, not when inference finished.
+    """
     if camera["stop_event"].is_set():
         return None
     if camera["error"] is not None:

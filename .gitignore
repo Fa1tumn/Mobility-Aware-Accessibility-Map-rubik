@@ -2,4 +2,19 @@
 .env
 .env.*
 !.env.example
+
+# Python
 __pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+
+# Local collection output (not the committed test fixture)
+observations.sqlite3
+
+# OS / editor
+.DS_Store

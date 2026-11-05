@@ -1,0 +1,22 @@
+[
+  {
+    "file": "area-best-640x360.onnx",
+    "sha256": "bfb4653c99d19d7eea02c3eefa557fba69e91f1abf4f6b2afff8f0495b69c749",
+    "task": "area",
+    "epoch": 7
+  },
+  {
+    "file": "material-epoch10-640x360.onnx",
+    "sha256": "ef465b6b4090348af65ff3cbdcdf485ec8e9fe2bf68f6ab633d158e06c7bf98c",
+    "task": "material",
+    "epoch": 10
+  },
+  {
+    "file": "checkpoints/area-best.pt",
+    "sha256": "d37c058041b371e8f604944db7763424b7e194c4f2fc69fbfa9ac1d22a921f3e"
+  },
+  {
+    "file": "checkpoints/material-best.pt",
+    "sha256": "451173e0d0e82d41e172dea9390122bc78f7d8db29a3eb1359dd73967d9880d6"
+  }
+]
