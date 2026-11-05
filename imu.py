@@ -1,7 +1,9 @@
+import argparse
 import asyncio
 from collections import deque
 import json
 import math
+from pathlib import Path
 import struct
 import threading
 import time
@@ -17,8 +19,62 @@ CONFIG = {
     "window_s": 2.0,
 }
 
+CALIBRATION_PATH = Path(__file__).with_name("imu_calibration.json")
+_level_gravity = None
 
-def start_imu() -> dict:
+
+def level_basis(gravity):
+    """Keep sensor x as forward, projected onto the calibrated level plane."""
+    up = np.asarray(gravity, dtype=float)
+    if up.shape != (3,) or not np.all(np.isfinite(up)) or np.linalg.norm(up) < 1e-6:
+        raise ValueError("Invalid level gravity vector.")
+    up = up / np.linalg.norm(up)
+    forward = np.array([1.0, 0.0, 0.0]) - up[0] * up
+    if np.linalg.norm(forward) < 0.1:
+        raise ValueError("Sensor x axis must point forward, not vertically.")
+    forward /= np.linalg.norm(forward)
+    return np.array([forward, np.cross(up, forward), up])
+
+
+def load_calibration():
+    global _level_gravity
+    _level_gravity = None
+    if not CALIBRATION_PATH.exists():
+        return
+    data = json.loads(CALIBRATION_PATH.read_text())
+    if data.get("device_address") != CONFIG["device_address"]:
+        raise ValueError("Saved IMU zero belongs to another device; run imu.py --zero again.")
+    gravity = data["level_gravity"]
+    level_basis(gravity)
+    _level_gravity = gravity
+    print(f"Loaded IMU level zero from {CALIBRATION_PATH.name}.")
+
+
+def save_level_zero(samples):
+    """Save an explicit stationary, level reference; never auto-zero on startup."""
+    global _level_gravity
+    if len(samples) < 160:
+        raise ValueError("Need at least 160 recent samples to set zero.")
+    acceleration = np.array([[s[k] for k in ("ax", "ay", "az")] for s in samples])
+    gyro = np.array([[s[k] for k in ("gx", "gy", "gz")] for s in samples])
+    if not np.all(np.isfinite(acceleration)) or not np.all(np.isfinite(gyro)):
+        raise ValueError("Invalid IMU samples; zero was not saved.")
+    gravity = acceleration.mean(axis=0)
+    if (np.max(acceleration.std(axis=0)) > 0.15
+            or np.max(np.linalg.norm(gyro, axis=1)) > 0.05
+            or not 7 < np.linalg.norm(gravity) < 12):
+        raise ValueError("Keep the wheelchair stationary on level ground, then retry --zero.")
+    level_basis(gravity)
+    data = {"device_address": CONFIG["device_address"], "level_gravity": gravity.tolist()}
+    temporary = CALIBRATION_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(data, indent=2) + "\n")
+    temporary.replace(CALIBRATION_PATH)
+    _level_gravity = gravity.tolist()
+
+
+def start_imu(load_zero=True) -> dict:
+    if load_zero:
+        load_calibration()
     imu_state = {
         "samples": deque(maxlen=2000),
         "lock": threading.Lock(),
@@ -228,6 +284,8 @@ def calculate_slope(samples: list):
     mean_x = float(np.mean(x_values))
     mean_y = float(np.mean(y_values))
     mean_z = float(np.mean(z_values))
+    if _level_gravity is not None:
+        mean_x, mean_y, mean_z = level_basis(_level_gravity) @ [mean_x, mean_y, mean_z]
     # Calculate directly without rejecting motion, vibration, or gravity deviations.
     horizontal_gravity = math.hypot(mean_y, mean_z)
     if horizontal_gravity == 0:
@@ -278,7 +336,14 @@ def stop_imu(imu_state: dict) -> None:
 
 
 if __name__ == "__main__":
-    state = start_imu()
+    parser = argparse.ArgumentParser(description="Monitor IMU or save its level mounting reference.")
+    parser.add_argument("--zero", action="store_true",
+                        help="Keep the wheelchair stationary on level ground and save this pose as zero.")
+    args = parser.parse_args()
+    if args.zero:
+        print("Setting zero: wheelchair must be stationary on level ground; keep IMU fixed with x forward.")
+    state = start_imu(load_zero=not args.zero)
+    zero_deadline = time.monotonic() + 30
     previous_count = 0
     previous_time = time.monotonic()
     try:
@@ -291,6 +356,8 @@ if __name__ == "__main__":
                 error = state["error"]
             if error is not None:
                 raise RuntimeError(error)
+            if args.zero and now >= zero_deadline:
+                raise RuntimeError("Timed out waiting for enough recent samples; zero was not saved.")
             rate = (count - previous_count) / (now - previous_time)
             previous_count = count
             previous_time = now
@@ -298,6 +365,11 @@ if __name__ == "__main__":
                 print(f"Waiting for recent IMU samples. received_rate_hz={rate:.1f}")
                 continue
             latest = samples[-1]
+            if args.zero:
+                if len(samples) >= 160:
+                    save_level_zero(samples)
+                    print(f"IMU zero saved to {CALIBRATION_PATH}. Future runs load it automatically.")
+                    break
             output = {"received_rate_hz": round(rate, 1), "window_samples": len(samples)}
             for key in ("ax", "ay", "az", "gx", "gy", "gz"):
                 output[key] = round(latest[key], 4)

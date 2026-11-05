@@ -230,7 +230,15 @@ Default packets have no device timestamp or sequence number. The receiver assign
 
 `Waiting for recent IMU samples` means no usable recent window is available. It is expected during connection. The printed `received_rate_hz` distinguishes ongoing reception from zero received samples during that reporting interval. Samples more than 0.15 seconds behind the current time are rejected.
 
-Keep `mounting_calibrated` false until the sensor is fixed to the platform with x forward and z upward, and its sensor/axis calibration has been verified. Then enable it in `imu.py`. Uncalibrated mounting or a zero slope denominator yields NULL slope; no meaningful vibration yields NULL frequency. Missing, stale or unsuitable IMU data also yields NULL metrics. GPS and image collection can continue without valid IMU metrics. Set `device_address` to `None` to disable BLE.
+To compensate for a curved mounting surface, fix the sensor with x pointing forward, park the wheelchair on known level ground, and keep it stationary. Stop other IMU collection processes and run:
+
+```bash
+/home/ubuntu/test/.venv/bin/python -B imu.py --zero
+```
+
+The command collects a recent two-second window, checks for movement, saves the reference gravity direction to local `imu_calibration.json`, and exits. It times out after 30 seconds if no usable window arrives. Both `imu.py` and `main.py` load this reference automatically on subsequent starts. The reference corrects mounting pitch and roll; it cannot determine forward direction, so sensor x must still point forward. Re-run `--zero` after moving the sensor. Never zero on a ramp: that ramp would become the new zero. This is a software mounting reference, not accelerometer factory calibration. The calibration file is excluded from Git and checked against the configured device address.
+
+Keep `mounting_calibrated` false until mounting and axis alignment have been verified, then enable it in `imu.py`. Without a saved reference the existing sensor-axis calculation is used. Uncalibrated mounting or a zero slope denominator yields NULL slope; no meaningful vibration yields NULL frequency. Missing, stale or unsuitable IMU data also yields NULL metrics. GPS and image collection can continue without valid IMU metrics. Set `device_address` to `None` to disable BLE.
 
 ## Upload to Supabase
 
