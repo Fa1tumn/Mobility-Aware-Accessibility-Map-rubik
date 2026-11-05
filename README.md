@@ -1,5 +1,15 @@
 # Mobility-Aware-Accessibility-Map-rubik
 
+Current collection uses the Area + Material LR-ASPP models with ONNX Runtime
+on CPU and a target two-second period. See [CPU collection setup](docs/field-collection-cpu.md)
+for dependencies, Git LFS model downloads, timing checks, and field operation.
+The earlier QNN/YOLO examples below describe the previous inference backend.
+
+For an existing Supabase table, uploads remain compatible with the legacy
+columns; full model metadata is kept in SQLite. Apply
+[supabase_surface_metadata.sql](supabase_surface_metadata.sql), restart collection,
+and rerun the standalone uploader to backfill that metadata to Supabase.
+
 Each collection iteration produces one database record, with null fields for unavailable devices. The phone supplies GPS only; a separate IMU supplies motion samples. `main.py` collects the frame, GPS and IMU window, runs surface inference, combines their outputs, and asks `storage.py` to save the record.
 
 ## Data flow
@@ -94,7 +104,7 @@ The packets pass through `receive_data()`, `decode_packet()` and `add_sample()`.
 }
 ```
 
-Slope comes from mean gravity components during near-static motion. Average vibration frequency is the power-weighted mean from 1 to 40 Hz of the acceleration magnitude signal, with at least 80 samples/s. These values are calculated from the samples. The slope/frequency targets are parameters used to generate the test packets.
+Slope is calculated directly as `100 * mean(ax) / hypot(mean(ay), mean(az))`, without rejecting motion, vibration, gravity-magnitude deviations, or negative mean Z acceleration. Acceleration during motion can affect the estimate. Average vibration frequency is the power-weighted mean from 1 to 40 Hz of the acceleration magnitude signal, with at least 80 samples/s. These values are calculated from the samples. The slope/frequency targets are parameters used to generate the test packets.
 
 ### 4. Surface inference
 
@@ -220,7 +230,7 @@ Default packets have no device timestamp or sequence number. The receiver assign
 
 `Waiting for recent IMU samples` means no usable recent window is available. It is expected during connection. The printed `received_rate_hz` distinguishes ongoing reception from zero received samples during that reporting interval. Samples more than 0.15 seconds behind the current time are rejected.
 
-Keep `mounting_calibrated` false until the sensor is fixed to the platform with x forward and z upward, and its sensor/axis calibration has been verified. Then enable it in `imu.py`. Uncalibrated mounting yields NULL slope; no meaningful vibration yields NULL frequency. Missing, stale or unsuitable IMU data also yields NULL metrics. GPS and image collection can continue without valid IMU metrics. Set `device_address` to `None` to disable BLE.
+Keep `mounting_calibrated` false until the sensor is fixed to the platform with x forward and z upward, and its sensor/axis calibration has been verified. Then enable it in `imu.py`. Uncalibrated mounting or a zero slope denominator yields NULL slope; no meaningful vibration yields NULL frequency. Missing, stale or unsuitable IMU data also yields NULL metrics. GPS and image collection can continue without valid IMU metrics. Set `device_address` to `None` to disable BLE.
 
 ## Upload to Supabase
 

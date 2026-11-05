@@ -221,24 +221,16 @@ def calculate_slope(samples: list):
     x_values = []
     y_values = []
     z_values = []
-    gyro_squared = []
     for sample in samples:
         x_values.append(sample["ax"])
         y_values.append(sample["ay"])
         z_values.append(sample["az"])
-        gyro_squared.append(sample["gx"] ** 2 + sample["gy"] ** 2 + sample["gz"] ** 2)
     mean_x = float(np.mean(x_values))
     mean_y = float(np.mean(y_values))
     mean_z = float(np.mean(z_values))
-    gravity = math.sqrt(mean_x ** 2 + mean_y ** 2 + mean_z ** 2)
-    if mean_z <= 0 or abs(gravity - 9.80665) >= 0.5:
-        return None
-    if math.sqrt(float(np.mean(gyro_squared))) >= 0.1:
-        return None
-    if max(np.std(x_values), np.std(y_values), np.std(z_values)) >= 0.5:
-        return None
+    # Calculate directly without rejecting motion, vibration, or gravity deviations.
     horizontal_gravity = math.hypot(mean_y, mean_z)
-    if horizontal_gravity <= 0.1:
+    if horizontal_gravity == 0:
         return None
     return 100 * mean_x / horizontal_gravity
 
