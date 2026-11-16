@@ -1,5 +1,6 @@
 """Regression tests for partial observations and mocked Supabase uploads."""
 from contextlib import ExitStack
+import itertools
 import json
 from pathlib import Path
 import tempfile
@@ -22,7 +23,7 @@ class PartialDeviceTests(unittest.TestCase):
             "camera_start": (main.vision, "open_camera", {}),
             "camera_read": (main.vision, "capture_frame", frame),
             "gps_start": (main.phone, "start_phone", {}),
-            "gps_read": (main.phone, "get_latest_gps", gps),
+            "gps_read": (main.phone, "get_gps_at", gps),
             "imu_start": (main.imu, "start_imu", {}),
             "imu_read": (main.imu, "get_window", []),
             "imu_analysis": (main.imu, "analyze_samples", metrics),
@@ -32,12 +33,29 @@ class PartialDeviceTests(unittest.TestCase):
             database = str(Path(directory) / "observations.sqlite3")
             stack.enter_context(patch.dict(storage.CONFIG, {"db_path": database}))
             stack.enter_context(patch.dict(main.os.environ, {"SUPABASE_URL": "https://example.supabase.co", "SUPABASE_SECRET_KEY": "test-key"}))
-            stack.enter_context(patch.object(main.time, "monotonic", return_value=100.0))
-            stack.enter_context(patch.object(main.time, "sleep", side_effect=[None] * (iterations - 1) + [KeyboardInterrupt]))
+            now = [100.0]
+            stack.enter_context(patch.object(main.time, "monotonic", side_effect=lambda: now[0]))
+            stack.enter_context(patch.object(main.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)))
+            real_windows = main.camera_inference.iter_windows
+            def limited_windows(*args):
+                yield from itertools.islice(real_windows(*args), iterations)
+            stack.enter_context(patch.object(main.camera_inference, "iter_windows",
+                side_effect=limited_windows))
             for name, (module, method, value) in operations.items():
                 kwargs = {"side_effect": RuntimeError("device failed")} if failure == name else {"return_value": value}
                 if failure == name + "_none":
                     kwargs = {"return_value": None}
+                if name == "camera_read":
+                    def capture(*args):
+                        now[0] += 0.2
+                        if failure == "camera_read":
+                            raise RuntimeError("device failed")
+                        if failure == "camera_read_none":
+                            return None
+                        return {**frame, "frame_monotonic": now[0]}
+                    kwargs = {"side_effect": capture}
+                if name == "gps_read" and failure not in ("gps_read", "gps_read_none"):
+                    kwargs = {"side_effect": lambda state, reference: {**gps, "gps_monotonic": reference}}
                 stack.enter_context(patch.object(module, method, **kwargs))
             for module, method in ((main.vision, "close_camera"), (main.phone, "stop_phone"), (main.imu, "stop_imu")):
                 stack.enter_context(patch.object(module, method))
@@ -78,7 +96,10 @@ class PartialDeviceTests(unittest.TestCase):
                 expected = {"latitude": 37.5, "longitude": 127.0, "surface_label": "asphalt", "surface_confidence": 0.9, "objects_supported": False, "slope_percent": 5.0, "vibration_frequency_avg_hz": 8.0}
                 for field, value in expected.items():
                     if field not in fields:
-                        self.assertEqual(records[0][field], value)
+                        if isinstance(value, float):
+                            self.assertAlmostEqual(records[0][field], value)
+                        else:
+                            self.assertEqual(records[0][field], value)
                 self.assertTrue(records[0]["record_time"])
 
     def test_upload_failure_retries_saved_records(self):

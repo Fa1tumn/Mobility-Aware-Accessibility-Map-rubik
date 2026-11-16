@@ -6,15 +6,12 @@ import phone
 import imu
 import vision
 import inference
+import camera_inference
 import storage
 import upload_supabase
 
 CONFIG = {
-    "interval_s": 2.0,            # Target period between records. Sleep is reduced
-                                  # by processing time; if processing already
-                                  # exceeds this, the loop continues immediately
-                                  # and vision.capture_frame hands back the newest
-                                  # frame (the reader keeps only the latest).
+    "interval_s": 2.0,            # Fixed, non-overlapping multi-frame windows.
     "max_gps_time_diff_s": 1.0,
     "max_gps_accuracy_m": 10.0,
     "timing": True,               # Log the preprocess/Area/Material/postprocess split.
@@ -63,9 +60,11 @@ def main() -> None:
     imu_state = None
     camera = None
     connection = None
+    models = None
+    windows = None
     try:
         supabase_url = os.environ.get("SUPABASE_URL", "https://vptvvtxqqocpaepziqmz.supabase.co/rest/v1/")
-        api_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+        api_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         upload_enabled = bool(supabase_url and api_key)
         pending_uploads = []
         if not upload_enabled:
@@ -77,35 +76,35 @@ def main() -> None:
         camera = device_output("Camera", vision.open_camera)
         print("Pipeline started. Press Ctrl+C to stop.")
 
-        while True:
+        windows = camera_inference.iter_windows(
+            camera, models, CONFIG["interval_s"], CONFIG["timing"],
+        )
+        for window in windows:
             loop_start = time.monotonic()
-            # capture_frame returns the newest decoded frame; a slow iteration
-            # does not build a backlog because the reader keeps only the latest.
-            frame = device_output("Camera", vision.capture_frame, camera) if camera is not None else None
-            # The record timestamp is the frame's capture time, not the time
-            # inference finishes, so a slow CPU does not skew observation times.
-            reference_monotonic = frame["frame_monotonic"] if frame is not None else time.monotonic()
-            # Snapshot GPS before inference so new updates cannot change this record.
-            gps = device_output("GPS", phone.get_latest_gps, phone_state) if phone_state is not None else None
+            reference_monotonic = window["end_monotonic"]
+            gps = device_output("GPS", phone.get_gps_at, phone_state, reference_monotonic) if phone_state is not None else None
             imu_result = None
             if imu_state is not None:
                 samples = device_output("IMU", imu.get_window, imu_state, reference_monotonic)
                 if samples is not None:
                     imu_result = device_output("IMU analysis", imu.analyze_samples, samples)
-            result = None
-            if frame is not None and models is not None:
-                result = device_output(
-                    "Image inference", inference.analyze_image, frame["image"], models, CONFIG["timing"]
-                )
-            timing = result.pop("timing_ms", None) if result else None
-            record = combine_data(frame, gps, result, imu_result, reference_monotonic)
+            result = window["result"]
+            timing = result.get("timing_ms") if result else None
+            # Record time denotes the window end; all sensor matching uses the
+            # same monotonic boundary, independent of inference/upload latency.
+            frame_reference = {"frame_time": window["window_end_time"],
+                               "frame_monotonic": reference_monotonic}
+            record = combine_data(frame_reference, gps, result, imu_result, reference_monotonic)
+            for field in storage.WINDOW_METADATA_FIELDS:
+                record[field] = window[field]
             record_id = storage.save_record(connection, record)
             processing_s = time.monotonic() - loop_start
             timing_note = f", infer={timing['total']}ms" if timing else ""
             print(
                 f"Saved record {record_id}: time={record['record_time']}, "
                 f"surface={record['surface_label']}{timing_note}, "
-                f"loop={processing_s * 1000:.0f}ms"
+                f"frames={window['inference_count']}/{window['frame_count']}, "
+                f"save={processing_s * 1000:.0f}ms"
             )
             if timing:
                 print(
@@ -121,13 +120,9 @@ def main() -> None:
                     print(f"Supabase upload failed; records remain in SQLite and will be retried next iteration: {message}")
                 else:
                     pending_uploads.clear()
-            # Keep the target period: sleep only for the remaining time. If the
-            # iteration already overran, continue immediately (no backlog).
-            remaining_s = CONFIG["interval_s"] - (time.monotonic() - loop_start)
-            if remaining_s > 0:
-                time.sleep(remaining_s)
-            else:
-                print(f"  Iteration exceeded target {CONFIG['interval_s']}s; processing newest frame next.")
+            lag_s = time.monotonic() - reference_monotonic
+            if lag_s > CONFIG["interval_s"]:
+                print(f"  Window delivery lag={lag_s:.1f}s; capture timestamps remain unchanged.")
 
     except KeyboardInterrupt:
         print("Ctrl+C received. Stopping.")
@@ -136,6 +131,13 @@ def main() -> None:
         raise
     finally:
         # Close each resource even if another cleanup fails.
+        if windows is not None:
+            windows.close()
+        if models is not None:
+            try:
+                inference.close_models(models)
+            except Exception as error:
+                print(f"Failed to close models: {error}")
         if camera is not None:
             try:
                 vision.close_camera(camera)

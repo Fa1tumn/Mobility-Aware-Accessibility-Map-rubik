@@ -1,3 +1,4 @@
+from collections import deque
 import json
 import math
 import threading
@@ -15,6 +16,7 @@ CONFIG = {
 def start_phone() -> dict:
     phone_state = {
         "latest_gps": None,
+        "gps_history": deque(maxlen=2048),
         "lock": threading.Lock(),
         "server": None,
         "thread": None,
@@ -111,6 +113,7 @@ def update_gps(phone_state: dict, payload: dict) -> bool:
 
     with phone_state["lock"]:
         phone_state["latest_gps"] = gps
+        phone_state.setdefault("gps_history", deque(maxlen=2048)).append(gps)
     return True
 
 
@@ -121,6 +124,15 @@ def get_latest_gps(phone_state: dict):
             return None
         gps_snapshot = gps.copy()
     return gps_snapshot
+
+
+def get_gps_at(phone_state: dict, reference_monotonic: float):
+    """Closest received GPS to the window end; main applies age/accuracy limits."""
+    with phone_state["lock"]:
+        history = phone_state.get("gps_history", ())
+        if not history:
+            return None
+        return min(history, key=lambda gps: abs(gps["gps_monotonic"] - reference_monotonic)).copy()
 
 
 def stop_phone(phone_state: dict) -> None:

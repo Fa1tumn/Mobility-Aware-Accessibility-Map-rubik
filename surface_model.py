@@ -11,6 +11,7 @@ swapped without touching image handling or the decision policy:
 
     * preprocess / postprocess / policy  -- pure NumPy, identical everywhere.
     * Backend                            -- runs one model's logits.
+      - TorchBackend:       bundled .pt checkpoints on CPU or a torch device.
       - OnnxRuntimeBackend: CPU/PC verification without an NPU.
       - QnnBackend:         Rubik Pi NPU via qnn-net-run (added later).
 
@@ -202,6 +203,42 @@ class OnnxRuntimeBackend(Backend):
         return np.asarray(outputs[0], dtype=np.float32)
 
 
+class TorchBackend(Backend):
+    """Run one bundled LR-ASPP checkpoint without downloading backbone weights."""
+
+    def __init__(self, model_path, labels, task, device="cpu"):
+        import torch
+        from torchvision.models.segmentation import lraspp_mobilenet_v3_large
+        from numpy._core.multiarray import _reconstruct
+
+        self.torch = torch
+        self.device = torch.device(device)
+        # The training checkpoints include NumPy RNG state. Allow only the
+        # required array types; keep PyTorch's restricted weights-only loader.
+        with torch.serialization.safe_globals([
+            _reconstruct, np.ndarray, np.dtype, type(np.dtype("uint32")),
+        ]):
+            checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
+        if checkpoint.get("names") != labels:
+            raise ValueError(f"{task} checkpoint labels differ from model-spec.json")
+        if checkpoint.get("config", {}).get("task") != task:
+            raise ValueError(f"Expected a {task} checkpoint: {model_path}")
+        self.epoch = checkpoint["epoch"]
+        self.model = lraspp_mobilenet_v3_large(
+            weights=None, weights_backbone=None, num_classes=len(labels),
+        )
+        self.model.load_state_dict(checkpoint["model"], strict=True)
+        self.model.to(self.device).eval()
+
+    def run(self, input_tensor: np.ndarray) -> np.ndarray:
+        with self.torch.inference_mode():
+            tensor = self.torch.from_numpy(input_tensor).to(self.device)
+            return self.model(tensor)["out"].cpu().numpy()
+
+    def close(self) -> None:
+        self.model = None
+
+
 class SurfaceModel:
     """Area + Material pipeline bound to a pair of backends and the spec."""
 
@@ -221,6 +258,31 @@ class SurfaceModel:
             OnnxRuntimeBackend(material_path, providers),
             spec,
         )
+
+    @classmethod
+    def from_checkpoints(cls, model_dir=MODEL_DIR, device="cpu", threads=2) -> "SurfaceModel":
+        import torch
+
+        if threads < 1:
+            raise ValueError("torch_threads must be positive")
+        torch.set_num_threads(threads)
+        model_dir = Path(model_dir)
+        spec = load_spec(model_dir / "model-spec.json")
+        if spec["architecture"] != "lraspp_mobilenet_v3_large":
+            raise ValueError("Unsupported checkpoint architecture")
+        backends = {}
+        try:
+            for task in ("area", "material"):
+                backends[task] = TorchBackend(
+                    model_dir / "checkpoints" / f"{task}-best.pt",
+                    spec["models"][task]["labels"], task, device,
+                )
+                spec["models"][task]["epoch"] = backends[task].epoch
+        except BaseException:
+            for backend in backends.values():
+                backend.close()
+            raise
+        return cls(backends["area"], backends["material"], spec)
 
     def analyze(self, image, timing: bool = False) -> dict:
         """BGR frame -> combined surface observation (same frame, in sequence).

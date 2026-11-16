@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import http.client
 import json
 import math
@@ -189,7 +190,7 @@ def test_full_pipeline(database_path):
         with patch.dict(phone.CONFIG, {"host": "127.0.0.1", "port": 0}):
             phone_state = phone.start_phone()
         with patch.dict(imu.CONFIG, {"device_address": None, "notify_uuid": None}):
-            imu_state = imu.start_imu()
+            imu_state = imu.start_imu(load_zero=False)
         inject_phone(phone_state, case)
         camera = inject_camera(case)
         frame = vision.capture_frame(camera)
@@ -198,15 +199,26 @@ def test_full_pipeline(database_path):
         camera["frames"].put(frame)
 
         fake_model, inference_calls = build_fake_surface_model(case)
+        def single_window(*args):
+            rows = [inference.analyze_image(frame["image"], {"surface": fake_model}) for _ in range(2)]
+            yield {
+                "window_start_time": (datetime.fromisoformat(frame["frame_time"].replace("Z", "+00:00")) - timedelta(seconds=2)).isoformat(),
+                "window_end_time": frame["frame_time"],
+                "start_monotonic": frame["frame_monotonic"] - 2,
+                "end_monotonic": frame["frame_monotonic"],
+                "frame_count": 2, "inference_count": 2,
+                "result": main.camera_inference.aggregate_results(rows),
+            }
         with patch.dict(storage.CONFIG, {"db_path": str(database_path)}), \
+             patch.dict(os.environ, {"SUPABASE_URL": ""}), \
              patch.dict(imu.CONFIG, {"mounting_calibrated": True}), \
              patch.object(inference, "load_models", return_value={"surface": fake_model}), \
              patch.object(phone, "start_phone", return_value=phone_state), \
              patch.object(imu, "start_imu", return_value=imu_state), \
              patch.object(vision, "open_camera", return_value=camera), \
-             patch.object(main.time, "sleep", side_effect=KeyboardInterrupt):
+             patch.object(main.camera_inference, "iter_windows", side_effect=single_window):
             main.main()
-        assert len(inference_calls) == 2  # Area + Material ran once each.
+        assert len(inference_calls) == 4  # Area + Material ran on both frames.
         records = read_records(database_path)
         assert len(records) == 2
         assert records[0]["record_time"] == "old"
@@ -247,7 +259,7 @@ def test_module_case(case, connection, database_path):
         print(f"vision.py: JPEG pipe -> BGR {frame['image'].shape}, time={frame['frame_time']}")
 
         with patch.dict(imu.CONFIG, {"device_address": None, "notify_uuid": None}):
-            imu_state = imu.start_imu()
+            imu_state = imu.start_imu(load_zero=False)
         inject_imu(imu_state, case, frame["frame_monotonic"])
         samples = imu.get_window(imu_state, frame["frame_monotonic"])
         assert len(samples) == 200
@@ -327,7 +339,7 @@ def test_imu_clock_drift():
     packet = b"\x55\x61" + struct.pack("<9h", 0, 0, 2048, 0, 0, 0, 0, 0, 0)
     for actual_rate in (99.3, 100.7):
         with patch.dict(imu.CONFIG, {"device_address": None, "sample_rate_hz": 100}):
-            state = imu.start_imu()
+            state = imu.start_imu(load_zero=False)
             try:
                 previous_time = 0.0
                 for batch in range(2500):
@@ -348,8 +360,8 @@ def test_imu_clock_drift():
     print("IMU TIMING: PASS - slow clock drift, notification jitter, and stale-data rejection.")
 
 
-def run_test():
-    saved_database_path = Path(__file__).resolve().with_name("test_observations.sqlite3")
+def run_test(saved_database_path=None):
+    saved_database_path = Path(saved_database_path) if saved_database_path else Path(__file__).resolve().with_name("test_observations.sqlite3")
     print("Mode: software test; device input and the NPU/model backends are simulated.")
     print("HTTP, camera pipe reading, IMU calculations, the Area+Material adapter, and SQLite are real.")
     test_imu_clock_drift()

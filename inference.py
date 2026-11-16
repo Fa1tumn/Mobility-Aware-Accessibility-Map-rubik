@@ -4,6 +4,7 @@ This wraps the area-surface-v3 adapter (surface_model.py): Area + Material
 LR-ASPP MobileNetV3 models run on the same frame in sequence, combined by the
 spec policy. The execution backend is selectable:
 
+    backend = "torch"        -> bundled checkpoints/area-best.pt + material-best.pt.
     backend = "onnxruntime"  -> CPU/PC, verified against the reference outputs.
     backend = "qnn"          -> Rubik Pi NPU via qnn-net-run (added after the
                                  on-device SDK/runtime versions are confirmed).
@@ -14,13 +15,16 @@ confidence, the Area/Material acceptance ratios, and the model/policy versions.
 Stairs and damage heads are out of scope for this package.
 """
 
+import os
 from pathlib import Path
 
 import surface_model
 
 CONFIG = {
-    "backend": "onnxruntime",                      # "onnxruntime" or "qnn"
+    "backend": os.environ.get("INFERENCE_BACKEND", "torch"),  # torch / onnxruntime / qnn
     "model_dir": str(surface_model.MODEL_DIR),
+    "torch_device": os.environ.get("TORCH_DEVICE", "cpu"),
+    "torch_threads": int(os.environ.get("TORCH_THREADS", "2")),
     # onnxruntime backend
     "onnx_providers": None,                         # None -> ["CPUExecutionProvider"]
     # qnn backend (Rubik Pi); set once models are compiled to .dlc/.bin
@@ -37,7 +41,12 @@ def load_models() -> dict:
     backend = CONFIG["backend"]
     model_dir = Path(CONFIG["model_dir"]).expanduser().resolve()
 
-    if backend == "onnxruntime":
+    if backend == "torch":
+        model = surface_model.SurfaceModel.from_checkpoints(
+            model_dir=model_dir, device=CONFIG["torch_device"],
+            threads=CONFIG["torch_threads"],
+        )
+    elif backend == "onnxruntime":
         model = surface_model.SurfaceModel.from_onnxruntime(
             model_dir=model_dir, providers=CONFIG["onnx_providers"],
         )
@@ -61,3 +70,8 @@ def analyze_image(image, models: dict, timing: bool = False) -> dict:
     preprocess/area/material/postprocess split for on-device measurement.
     """
     return models["surface"].analyze(image, timing=timing)
+
+
+def close_models(models):
+    if models and models.get("surface") is not None:
+        models["surface"].close()

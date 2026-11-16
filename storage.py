@@ -1,6 +1,8 @@
 import json
 import sqlite3
 
+WINDOW_METADATA_FIELDS = ("window_start_time", "window_end_time", "frame_count", "inference_count")
+
 CONFIG = {
     "db_path": "observations.sqlite3",
 }
@@ -39,6 +41,10 @@ def open_database():
         for name in ("model_version", "policy_version"):
             if name not in columns:
                 cursor.execute(f"ALTER TABLE observations ADD COLUMN {name} TEXT")
+        for name in WINDOW_METADATA_FIELDS:
+            if name not in columns:
+                kind = "INTEGER" if name.endswith("count") else "TEXT"
+                cursor.execute(f"ALTER TABLE observations ADD COLUMN {name} {kind}")
         connection.commit()
         cursor.close()
     except Exception:
@@ -69,8 +75,8 @@ def save_record(connection, record: dict) -> int:
                 slope_percent,
                 vibration_frequency_avg_hz,
                 objects_supported,
-                objects
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                objects, window_start_time, window_end_time, frame_count, inference_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             record["record_time"],
             record["latitude"],
@@ -84,7 +90,8 @@ def save_record(connection, record: dict) -> int:
             record.get("slope_percent"),
             record.get("vibration_frequency_avg_hz"),
             record["objects_supported"],
-            objects_json
+            objects_json,
+            *(record.get(field) for field in WINDOW_METADATA_FIELDS),
         ))
         connection.commit()
         return cursor.lastrowid

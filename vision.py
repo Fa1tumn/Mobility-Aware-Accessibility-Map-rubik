@@ -1,6 +1,7 @@
 import os
 import queue
 import signal
+import sys
 import subprocess
 import threading
 import time
@@ -71,7 +72,7 @@ def _read_frames(camera, cv2, np) -> None:
                     del buffer[:start]
                     if len(buffer) > 16 * 1024 * 1024:
                         buffer.clear()
-                        print("JPEG buffer is too large; discarded the incomplete frame.")
+                        print("JPEG buffer is too large; discarded the incomplete frame.", file=sys.stderr)
                     break
 
                 jpeg_bytes = bytes(buffer[start:end + 2])
@@ -80,7 +81,7 @@ def _read_frames(camera, cv2, np) -> None:
                     np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR,
                 )
                 if image is None:
-                    print("Failed to decode a JPEG frame; skipping it.")
+                    print("Failed to decode a JPEG frame; skipping it.", file=sys.stderr)
                     continue
 
                 # Timestamp decoding, not exposure or the main loop queue read.
@@ -115,12 +116,12 @@ def capture_frame(camera):
     if camera["stop_event"].is_set():
         return None
     if camera["error"] is not None:
-        print(camera["error"])
+        print(camera["error"], file=sys.stderr)
         return None
     try:
         return camera["frames"].get(timeout=1.0)
     except queue.Empty:
-        print(camera["error"] or "No camera frame available. Check GStreamer output.")
+        print(camera["error"] or "No camera frame available. Check GStreamer output.", file=sys.stderr)
         return None
 
 

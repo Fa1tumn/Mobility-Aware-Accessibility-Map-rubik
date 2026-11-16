@@ -29,6 +29,20 @@ class CloudIdTests(unittest.TestCase):
         self.assertEqual(parse_qs(urlsplit(sent.full_url).query)['on_conflict'], ['source_id,record_time'])
         self.assertTrue(all('source_id' not in row and row['id'] == 1 for row in records))
 
+    def test_window_diagnostics_stay_local(self):
+        record = {"id": 1, "record_time": "2026-11-16T00:00:02Z",
+                  "surface_label": "cement", "frame_count": 3, "inference_count": 2,
+                  "window_start_time": "2026-11-16T00:00:00Z",
+                  "window_end_time": "2026-11-16T00:00:02Z"}
+        response = MagicMock()
+        response.__enter__.return_value = response
+        with patch.object(upload_supabase, "urlopen", return_value=response) as request:
+            upload_supabase.upload_records([record], "https://example.supabase.co", "key")
+        sent = json.loads(request.call_args.args[0].data)[0]
+        self.assertTrue(set(upload_supabase.WINDOW_METADATA_FIELDS).isdisjoint(sent))
+        self.assertEqual(sent["surface_label"], "cement")
+        self.assertEqual(record["frame_count"], 3)
+
     def test_retry_uses_the_same_key_and_handles_batches(self):
         records = [{"id": i, "record_time": "2026-11-05T00:00:00Z"} for i in range(1, 4)]
         response = MagicMock()

@@ -1,5 +1,10 @@
 # Rubik Pi CPU 현장 수집 (Area + Material, ONNX Runtime)
 
+> The default now uses PyTorch checkpoints with two-second multi-frame aggregation.
+> Read the [current execution guide](checkpoint-camera-inference.md) first.
+> The notes below describe the earlier ONNX single-frame collection workflow.
+> To use ONNX, explicitly set `INFERENCE_BACKEND=onnxruntime`.
+
 NPU 변환은 보류하고, Rubik Pi의 **CPU에서 ONNX Runtime으로 온디바이스 추론**을
 돌려 현장 수집을 수행하는 절차입니다. 발표 설명: "Rubik Pi CPU에서 온디바이스 추론".
 

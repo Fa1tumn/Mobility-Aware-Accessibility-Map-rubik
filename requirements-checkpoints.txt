@@ -1,0 +1,5 @@
+# Direct inference using the bundled training checkpoints (NumPy RNG metadata).
+-r requirements-adapter.txt
+numpy>=2,<3
+torch>=2.6
+torchvision>=0.21

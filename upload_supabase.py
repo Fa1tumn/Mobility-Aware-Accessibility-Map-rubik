@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+
+from storage import WINDOW_METADATA_FIELDS
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -107,7 +109,9 @@ def upload_records(records, supabase_url, api_key):
         # Omit cloud id so PostgreSQL allocates it; keep a stable retry key.
         batch = []
         for record in records[start:start + CONFIG["batch_size"]]:
-            cloud_record = dict(record)
+            # Window diagnostics stay local; no remote schema migration needed.
+            cloud_record = {key: value for key, value in record.items()
+                            if key not in WINDOW_METADATA_FIELDS}
             cloud_record["source_id"] = cloud_record.pop("id")
             batch.append(cloud_record)
         _post_batch(batch, url, headers, api_key)

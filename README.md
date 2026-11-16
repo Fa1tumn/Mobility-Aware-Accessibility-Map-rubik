@@ -1,16 +1,19 @@
 # Mobility-Aware-Accessibility-Map-rubik
 
-Current collection uses the Area + Material LR-ASPP models with ONNX Runtime
-on CPU and a target two-second period. See [CPU collection setup](docs/field-collection-cpu.md)
-for dependencies, Git LFS model downloads, timing checks, and field operation.
-The earlier QNN/YOLO examples below describe the previous inference backend.
+Current collection runs both Area + Material checkpoints on camera frames and
+aggregates successful frame predictions into fixed two-second windows. See
+[checkpoint camera inference](docs/checkpoint-camera-inference.md) for setup,
+the standalone JSONL script, timing rules, and validation. PyTorch CPU is the
+default; ONNX Runtime remains selectable with `INFERENCE_BACKEND=onnxruntime`.
+The [CPU collection notes](docs/field-collection-cpu.md) and earlier QNN/YOLO
+examples below also contain historical backend information.
 
 For an existing Supabase table, uploads remain compatible with the legacy
 columns; full model metadata is kept in SQLite. Apply
 [supabase_surface_metadata.sql](supabase_surface_metadata.sql), restart collection,
 and rerun the standalone uploader to backfill that metadata to Supabase.
 
-Each collection iteration produces one database record, with null fields for unavailable devices. The phone supplies GPS only; a separate IMU supplies motion samples. `main.py` collects the frame, GPS and IMU window, runs surface inference, combines their outputs, and asks `storage.py` to save the record.
+Each two-second window produces one database record, with null fields for unavailable devices. The phone supplies GPS only; a separate IMU supplies motion samples. `camera_inference.py` repeatedly runs both models and aggregates frame results; `main.py` aligns GPS and IMU to the window end and asks `storage.py` to save the record.
 
 ## Data flow
 
@@ -35,8 +38,9 @@ flowchart LR
 | `phone.py` | GPS JSON over HTTP -> validate fields and add receive times -> latest GPS dictionary. |
 | `vision.py` | JPEG bytes from GStreamer stdout -> decode and keep the latest image in a queue -> BGR image with frame timestamps. |
 | `imu.py` | WT901BLE binary notifications -> split 20-byte packets, convert units and buffer samples -> two-second window, slope and average vibration frequency. |
-| `inference.py` | BGR image -> resize, normalize, run QNN/HTP and parse masks -> largest surface region's label and confidence. |
-| `main.py` | Frame, GPS and module results -> check GPS timing/accuracy and combine fields -> record dictionary. |
+| `inference.py` | BGR image -> Area + Material via PyTorch/ONNX -> surface label, confidence and acceptance ratios. |
+| `camera_inference.py` | Camera frames -> repeated inference -> one aggregate per two-second window; also a standalone JSONL CLI. |
+| `main.py` | Aggregated window, GPS history and IMU -> match window end and combine fields -> record dictionary. |
 | `storage.py` | Record dictionary -> parameterized SQLite INSERT -> saved row and record ID. Adds missing IMU columns to old databases. |
 | `test_pipeline.py` | Run the full pipeline once, then inject five cases into the modules separately -> check their combined records -> console results and `test_observations.sqlite3`. |
 | `upload_supabase.py` | Read SQLite rows -> convert boolean/JSON fields -> send batches to Supabase REST API and print upload counts. |
