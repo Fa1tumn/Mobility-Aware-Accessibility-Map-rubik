@@ -1,7 +1,10 @@
 import json
 import sqlite3
 
-WINDOW_METADATA_FIELDS = ("window_start_time", "window_end_time", "frame_count", "inference_count")
+# 창 진단값. 로컬 SQLite에만 저장하고 Supabase에는 올리지 않는다(upload_supabase 참고).
+# rejected_count/rejected_reasons: 품질 검사(과다 노출·노출 부족·단색)로 추론하지 않은 프레임 수와 이유.
+WINDOW_METADATA_FIELDS = ("window_start_time", "window_end_time", "frame_count", "inference_count",
+                          "rejected_count", "rejected_reasons")
 
 CONFIG = {
     "db_path": "observations.sqlite3",
@@ -82,8 +85,8 @@ def save_record(connection, record: dict, imu_window=None) -> int:
                 slope_percent,
                 vibration_frequency_avg_hz,
                 objects_supported,
-                objects, window_start_time, window_end_time, frame_count, inference_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                objects, """ + ", ".join(WINDOW_METADATA_FIELDS) + """
+            ) VALUES (""" + ", ".join("?" * (13 + len(WINDOW_METADATA_FIELDS))) + """)
         """, (
             record["record_time"],
             record["latitude"],

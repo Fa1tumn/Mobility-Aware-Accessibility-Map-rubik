@@ -4,6 +4,10 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from pathlib import Path
+
+import numpy as np
+
 import camera_inference as ci
 import phone
 
@@ -125,6 +129,65 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(gps["latitude"], 1)
         gps["latitude"] = 9
         self.assertEqual(state["gps_history"][0]["latitude"], 1)
+
+
+
+class FrameQualityTests(unittest.TestCase):
+    def test_frame_problem(self):
+        h, w = 720, 1280
+        textured = np.random.default_rng(0).integers(40, 200, (h, w, 3), dtype=np.uint8)
+        self.assertEqual(ci.frame_problem(np.full((h, w, 3), 255, np.uint8)), "overexposed")
+        self.assertEqual(ci.frame_problem(np.zeros((h, w, 3), np.uint8)), "underexposed")
+        self.assertEqual(ci.frame_problem(np.full((h, w, 3), 128, np.uint8)), "flat")
+        self.assertIsNone(ci.frame_problem(textured))
+        self.assertIsNone(ci.frame_problem("not an image"))     # 테스트용 가짜 프레임은 검사하지 않음
+
+    def test_rejected_frames_are_not_inferred(self):
+        now = [100.0]
+        white = np.full((720, 1280, 3), 255, np.uint8)
+        frames = iter([100.2, 100.6])
+
+        def capture(camera):
+            stamp = next(frames, None)
+            if stamp is None:
+                raise KeyboardInterrupt
+            now[0] = stamp
+            return {"frame_monotonic": stamp, "image": white}
+
+        with patch.object(ci.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(ci.vision, "capture_frame", side_effect=capture), \
+             patch.object(ci.inference, "analyze_image") as analyze:
+            windows = list(ci.iter_windows({}, {}))
+        analyze.assert_not_called()
+        self.assertEqual(windows[0]["frame_count"], 2)
+        self.assertEqual(windows[0]["inference_count"], 0)
+        self.assertEqual(windows[0]["rejected_frames"], {"overexposed": 2})
+        self.assertEqual((windows[0]["rejected_count"], windows[0]["rejected_reasons"]), (2, "overexposed:2"))
+        self.assertIsNone(windows[0]["result"])
+
+    def test_same_frame_has_same_hash(self):
+        img = np.random.default_rng(1).integers(0, 255, (720, 1280, 3), dtype=np.uint8)
+        self.assertEqual(ci.frame_stats(img)["hash"], ci.frame_stats(img.copy())["hash"])
+        self.assertNotEqual(ci.frame_stats(img)["hash"], ci.frame_stats(255 - img)["hash"])
+
+    def test_sampler_saves_first_rejected_per_window_and_periodic_ok(self):
+        import json
+        import tempfile
+        white = np.full((72, 128, 3), 255, np.uint8)
+        ok = np.random.default_rng(2).integers(40, 200, (72, 128, 3), dtype=np.uint8)
+        with tempfile.TemporaryDirectory() as tmp:
+            s = ci.FrameSampler(tmp, every_s=30)
+            frame = lambda img, t: {"image": img, "frame_monotonic": t, "frame_time": f"t{t}"}
+            self.assertIsNotNone(s.maybe_save(frame(white, 1), 0, ci.frame_stats(white), "overexposed"))
+            self.assertIsNone(s.maybe_save(frame(white, 1.5), 0, ci.frame_stats(white), "overexposed"))
+            self.assertIsNotNone(s.maybe_save(frame(white, 2.5), 1, ci.frame_stats(white), "overexposed"))
+            self.assertIsNotNone(s.maybe_save(frame(ok, 3), 1, ci.frame_stats(ok), None, result("blocks")))
+            self.assertIsNone(s.maybe_save(frame(ok, 20), 9, ci.frame_stats(ok), None, result("blocks")))
+            self.assertIsNotNone(s.maybe_save(frame(ok, 34), 16, ci.frame_stats(ok), None, result("blocks")))
+            lines = [json.loads(x) for x in open(f"{tmp}/samples.jsonl", encoding="utf-8")]
+            self.assertEqual([x["problem"] for x in lines], ["overexposed", "overexposed", None, None])
+            self.assertEqual(lines[2]["result"]["surface_label"], "blocks")
+            self.assertEqual(len(list(Path(tmp).glob("*.jpg"))), 4)
 
 
 if __name__ == "__main__":
