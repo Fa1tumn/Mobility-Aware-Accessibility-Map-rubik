@@ -97,7 +97,7 @@ def main() -> None:
                                "frame_monotonic": reference_monotonic}
             record = combine_data(frame_reference, gps, result, imu_result, reference_monotonic)
             for field in storage.WINDOW_METADATA_FIELDS:
-                record[field] = window[field]
+                record[field] = window.get(field)
             imu_window = imu.snapshot_window(samples) if samples is not None else None
             record_id = storage.save_record(connection, record, imu_window=imu_window)
             processing_s = time.monotonic() - loop_start
@@ -109,6 +109,7 @@ def main() -> None:
                 f"surface={record['surface_label']}{timing_note}, "
                 f"slope={slope_note}, imu_samples={len(samples) if samples is not None else 0}, "
                 f"frames={window['inference_count']}/{window['frame_count']}, "
+                f"rejected={window.get('rejected_frames') or '-'}, "
                 f"save={processing_s * 1000:.0f}ms"
             )
             if timing:
