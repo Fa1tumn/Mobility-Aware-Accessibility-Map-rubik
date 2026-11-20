@@ -1,10 +1,13 @@
 import argparse
 import asyncio
 from collections import deque
+from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 import struct
+import tempfile
 import threading
 import time
 
@@ -17,10 +20,13 @@ CONFIG = {
     "sample_rate_hz": 100,
     "mounting_calibrated": True,
     "window_s": 2.0,
+    "slope_filter_tau_s": 0.25,  # Continuous EMA; ~0.75 s to settle 95% of a step.
 }
 
 CALIBRATION_PATH = Path(__file__).with_name("imu_calibration.json")
 _level_gravity = None
+_attitude_level_gravity = None
+SLOPE_METHOD = "fused_attitude_ema_mean_v1"
 
 
 def level_basis(gravity):
@@ -37,8 +43,9 @@ def level_basis(gravity):
 
 
 def load_calibration():
-    global _level_gravity
+    global _level_gravity, _attitude_level_gravity
     _level_gravity = None
+    _attitude_level_gravity = None
     if not CALIBRATION_PATH.exists():
         return
     data = json.loads(CALIBRATION_PATH.read_text())
@@ -46,13 +53,19 @@ def load_calibration():
         raise ValueError("Saved IMU zero belongs to another device; run imu.py --zero again.")
     gravity = data["level_gravity"]
     level_basis(gravity)
+    attitude_gravity = data.get("attitude_level_gravity")
+    if attitude_gravity is not None:
+        level_basis(attitude_gravity)
     _level_gravity = gravity
+    _attitude_level_gravity = attitude_gravity
     print(f"Loaded IMU level zero from {CALIBRATION_PATH.name}.")
+    if attitude_gravity is None:
+        print("Using legacy acceleration mounting zero; run imu.py --zero on level ground to set fused-attitude zero.")
 
 
 def save_level_zero(samples):
     """Save an explicit stationary, level reference; never auto-zero on startup."""
-    global _level_gravity
+    global _level_gravity, _attitude_level_gravity
     if len(samples) < 160:
         raise ValueError("Need at least 160 recent samples to set zero.")
     acceleration = np.array([[s[k] for k in ("ax", "ay", "az")] for s in samples])
@@ -65,14 +78,27 @@ def save_level_zero(samples):
             or not 7 < np.linalg.norm(gravity) < 12):
         raise ValueError("Keep the wheelchair stationary on level ground, then retry --zero.")
     level_basis(gravity)
-    data = {"device_address": CONFIG["device_address"], "level_gravity": gravity.tolist()}
+    directions = [attitude_up(sample) for sample in samples]
+    if any(direction is None for direction in directions):
+        raise ValueError("Fused Roll/Pitch missing; zero was not saved.")
+    directions = np.array(directions)
+    attitude_gravity = directions.mean(axis=0)
+    if np.max(np.linalg.norm(directions - attitude_gravity, axis=1)) > 0.02:
+        raise ValueError("Fused attitude is not stable; keep still and retry --zero.")
+    level_basis(attitude_gravity)
+    data = {"device_address": CONFIG["device_address"], "level_gravity": gravity.tolist(),
+            "attitude_level_gravity": attitude_gravity.tolist()}
     temporary = CALIBRATION_PATH.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(data, indent=2) + "\n")
     temporary.replace(CALIBRATION_PATH)
     _level_gravity = gravity.tolist()
+    _attitude_level_gravity = attitude_gravity.tolist()
 
 
-def start_imu(load_zero=True) -> dict:
+def start_imu(load_zero=True, record_session=False) -> dict:
+    tau = CONFIG["slope_filter_tau_s"]
+    if not math.isfinite(tau) or tau < 0:
+        raise ValueError("slope_filter_tau_s must be finite and nonnegative.")
     if load_zero:
         load_calibration()
     imu_state = {
@@ -85,6 +111,10 @@ def start_imu(load_zero=True) -> dict:
         "byte_buffer": bytearray(),
         "received_samples": 0,
         "error": None,
+        "slope_filter": None,
+        "timing_resets": 0,
+        # Only the standalone monitor opts in. main.py never writes a report.
+        "session_samples": [] if record_session else None,
     }
     if CONFIG["device_address"] is None or CONFIG["notify_uuid"] is None:
         print("IMU Bluetooth is not configured; IMU values will be NULL.")
@@ -109,6 +139,9 @@ def decode_packet(data, timestamp_s) -> dict:
         "gx": values[3] * gyro_scale,
         "gy": values[4] * gyro_scale,
         "gz": values[5] * gyro_scale,
+        "roll_deg": values[6] * 180 / 32768,
+        "pitch_deg": values[7] * 180 / 32768,
+        "yaw_deg": values[8] * 180 / 32768,
     }
 
 
@@ -140,6 +173,9 @@ def receive_data(imu_state, data):
         # Default packets have no device timestamp; reset the window after a large timing error.
         if clock_offset is None or abs(clock_offset + last_timestamp_s - receive_time) > 0.25:
             imu_state["samples"].clear()
+            imu_state["slope_filter"] = None
+            if clock_offset is not None:
+                imu_state["timing_resets"] += 1
             imu_state["clock_offset_s"] = receive_time - last_timestamp_s
         else:
             # Follow slow clock drift without moving consecutive samples backwards.
@@ -158,6 +194,7 @@ def add_sample(imu_state: dict, payload: dict) -> bool:
     if not isinstance(payload, dict):
         return False
     keys = ("timestamp_s", "ax", "ay", "az", "gx", "gy", "gz")
+    keys += tuple(key for key in ("roll_deg", "pitch_deg", "yaw_deg") if key in payload)
     sample = {}
     for key in keys:
         value = payload.get(key)
@@ -180,11 +217,65 @@ def add_sample(imu_state: dict, payload: dict) -> bool:
         if imu_state["clock_offset_s"] is None:
             imu_state["clock_offset_s"] = receive_time - sample["timestamp_s"]
         sample["sample_monotonic"] = sample["timestamp_s"] + imu_state["clock_offset_s"]
+        _filter_attitude(imu_state, sample)
         imu_state["samples"].append(sample)
+        if imu_state.get("session_samples") is not None:
+            imu_state["session_samples"].append(sample.copy())
         imu_state["last_sample_time_s"] = sample["timestamp_s"]
         imu_state["received_samples"] += 1
         imu_state["error"] = None
     return True
+
+
+def attitude_up(sample):
+    """Earth up in sensor axes for the device's right-handed Z-Y-X Euler angles.
+
+    R = Rz(yaw) Ry(pitch) Rx(roll); R.T @ [0,0,1] does not depend on yaw.
+    Sensor x pointing uphill corresponds to negative device pitch.
+    """
+    try:
+        roll, pitch = (sample[key] for key in ("roll_deg", "pitch_deg"))
+        if any(isinstance(v, bool) or not math.isfinite(v) or abs(v) > 180
+               for v in (roll, pitch)):
+            return None
+        roll, pitch = math.radians(roll), math.radians(pitch)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return np.array([-math.sin(pitch), math.sin(roll) * math.cos(pitch),
+                     math.cos(roll) * math.cos(pitch)])
+
+
+def attitude_slope_deg(sample):
+    if not CONFIG["mounting_calibrated"]:
+        return None
+    up = attitude_up(sample)
+    if up is None:
+        return None
+    reference = _attitude_level_gravity if _attitude_level_gravity is not None else _level_gravity
+    if reference is not None:
+        up = level_basis(reference) @ up
+    denominator = math.hypot(up[1], up[2])
+    if denominator < 1e-6:
+        return None
+    return math.degrees(math.atan2(up[0], denominator))
+
+
+def _filter_attitude(imu_state, sample):
+    """Filter once on receipt, across window boundaries, resetting after gaps."""
+    angle = attitude_slope_deg(sample)
+    sample["attitude_slope_deg"] = angle
+    sample["smoothed_slope_deg"] = None
+    if angle is None:
+        imu_state["slope_filter"] = None
+        return
+    now = sample["sample_monotonic"]
+    previous = imu_state.get("slope_filter")
+    tau = CONFIG["slope_filter_tau_s"]
+    if previous is not None and 0 < now - previous[0] <= 0.1 and tau > 0:
+        alpha = -math.expm1(-(now - previous[0]) / tau)
+        angle = previous[1] + alpha * (angle - previous[1])
+    imu_state["slope_filter"] = (now, angle)
+    sample["smoothed_slope_deg"] = angle
 
 
 def _read_bluetooth(imu_state: dict) -> None:
@@ -271,26 +362,33 @@ def analyze_samples(samples: list) -> dict:
     return result
 
 
+def snapshot_window(samples):
+    """Capture the inputs and calibration used for later offline diagnosis."""
+    return {
+        "schema_version": 1,
+        "slope_method": SLOPE_METHOD,
+        "device_address": CONFIG["device_address"],
+        "sample_rate_hz": CONFIG["sample_rate_hz"],
+        "window_s": CONFIG["window_s"],
+        "mounting_calibrated": CONFIG["mounting_calibrated"],
+        "level_gravity": list(_level_gravity) if _level_gravity is not None else None,
+        "attitude_level_gravity": list(_attitude_level_gravity) if _attitude_level_gravity is not None else None,
+        "slope_filter_tau_s": CONFIG["slope_filter_tau_s"],
+        "samples": [dict(sample) for sample in samples],
+    }
+
+
 def calculate_slope(samples: list):
+    """Convert the window mean of continuously smoothed fused tilt to grade.
+
+    Missing attitude never silently falls back to the accelerometer estimator.
+    """
     if not samples or not CONFIG["mounting_calibrated"]:
         return None
-    x_values = []
-    y_values = []
-    z_values = []
-    for sample in samples:
-        x_values.append(sample["ax"])
-        y_values.append(sample["ay"])
-        z_values.append(sample["az"])
-    mean_x = float(np.mean(x_values))
-    mean_y = float(np.mean(y_values))
-    mean_z = float(np.mean(z_values))
-    if _level_gravity is not None:
-        mean_x, mean_y, mean_z = level_basis(_level_gravity) @ [mean_x, mean_y, mean_z]
-    # Calculate directly without rejecting motion, vibration, or gravity deviations.
-    horizontal_gravity = math.hypot(mean_y, mean_z)
-    if horizontal_gravity == 0:
+    angles = [sample.get("smoothed_slope_deg") for sample in samples]
+    if any(angle is None or not math.isfinite(angle) or abs(angle) >= 90 for angle in angles):
         return None
-    return 100 * mean_x / horizontal_gravity
+    return 100 * math.tan(math.radians(float(np.mean(angles))))
 
 
 def calculate_vibration_frequency(samples: list, timestamps):
@@ -335,18 +433,77 @@ def stop_imu(imu_state: dict) -> None:
             raise RuntimeError("IMU Bluetooth thread did not stop.")
 
 
-if __name__ == "__main__":
+def write_session_report(path, state, windows, metadata, started_at, duration_s, termination):
+    """Write the standalone monitor's full session, including its partial tail."""
+    with state["lock"]:
+        samples = list(state["session_samples"] or [])
+        timing_resets = state["timing_resets"]
+        last_error = state["error"]
+    slopes = [row["slope_percent"] for row in windows if row["slope_percent"] is not None]
+    report = {
+        "schema_version": 1,
+        "started_at_utc": started_at,
+        "ended_at_utc": datetime.now(timezone.utc).isoformat(),
+        "duration_s": duration_s,
+        "termination": termination,
+        "metadata": metadata,
+        "summary": {
+            "sample_count": len(samples), "window_count": len(windows),
+            "valid_slope_windows": len(slopes), "timing_resets": timing_resets,
+            "last_imu_error": last_error,
+            "slope_min_percent": min(slopes) if slopes else None,
+            "slope_max_percent": max(slopes) if slopes else None,
+            "slope_mean_percent": float(np.mean(slopes)) if slopes else None,
+        },
+        # Monitor polls every second; these two-second windows overlap.
+        "windows": windows,
+        "samples": samples,
+    }
+    path = Path(path).expanduser().absolute()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".imu-report-", suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(report, handle, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            handle.write("\n")
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print(f"IMU report saved: {path} ({len(samples)} samples, {len(windows)} windows)")
+    return path
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Monitor IMU or save its level mounting reference.")
     parser.add_argument("--zero", action="store_true",
                         help="Keep the wheelchair stationary on level ground and save this pose as zero.")
-    args = parser.parse_args()
+    parser.add_argument("--report", help="Monitor JSON output path; default: imu_report_<UTC timestamp>.json")
+    args = parser.parse_args(argv)
     if args.zero:
         print("Setting zero: wheelchair must be stationary on level ground; keep IMU fixed with x forward.")
-    state = start_imu(load_zero=not args.zero)
-    zero_deadline = time.monotonic() + 30
-    previous_count = 0
-    previous_time = time.monotonic()
+    started = datetime.now(timezone.utc)
+    started_monotonic = time.monotonic()
+    report_path = args.report or f"imu_report_{started.strftime('%Y%m%dT%H%M%S_%fZ')}.json"
+    state = None
+    windows = []
+    metadata = None
+    termination = "completed"
+    exit_code = 0
     try:
+        state = start_imu(load_zero=not args.zero, record_session=not args.zero)
+        metadata = snapshot_window([])
+        metadata.pop("samples")
+        metadata["session_start_monotonic"] = started_monotonic
+        print(f"Slope estimator: {SLOPE_METHOD}; smoothing tau={CONFIG['slope_filter_tau_s']:g}s.")
+        if not args.zero:
+            print(f"Press Ctrl+C to stop and save all received IMU samples to {report_path}")
+        zero_deadline = time.monotonic() + 30
+        previous_count = 0
+        previous_time = time.monotonic()
         while True:
             time.sleep(1)
             now = time.monotonic()
@@ -363,19 +520,46 @@ if __name__ == "__main__":
             previous_time = now
             if not samples:
                 print(f"Waiting for recent IMU samples. received_rate_hz={rate:.1f}")
-                continue
-            latest = samples[-1]
             if args.zero:
                 if len(samples) >= 160:
                     save_level_zero(samples)
                     print(f"IMU zero saved to {CALIBRATION_PATH}. Future runs load it automatically.")
                     break
-            output = {"received_rate_hz": round(rate, 1), "window_samples": len(samples)}
-            for key in ("ax", "ay", "az", "gx", "gy", "gz"):
-                output[key] = round(latest[key], 4)
+                continue
+            latest = samples[-1] if samples else {}
+            output = {"received_rate_hz": round(rate, 1), "window_samples": len(samples),
+                      "window_start_monotonic": now - CONFIG["window_s"],
+                      "window_end_monotonic": now,
+                      "window_end_utc": datetime.now(timezone.utc).isoformat()}
+            for key in ("ax", "ay", "az", "gx", "gy", "gz", "roll_deg", "pitch_deg", "yaw_deg"):
+                value = latest.get(key)
+                output[key] = round(value, 4) if value is not None else None
             output.update(analyze_samples(samples))
+            windows.append(output)
             print(json.dumps(output))
     except KeyboardInterrupt:
+        termination = "interrupted"
         print("Stopping IMU.")
+    except Exception as error:
+        termination = f"error: {error}"
+        exit_code = 1
+        print(f"IMU monitor failed: {error}")
     finally:
-        stop_imu(state)
+        try:
+            stop_imu(state)
+        except Exception as error:
+            termination += f"; cleanup error: {error}"
+            exit_code = 1
+            print(f"IMU cleanup failed: {error}")
+        if state is not None and not args.zero:
+            try:
+                write_session_report(report_path, state, windows, metadata, started.isoformat(),
+                                     time.monotonic() - started_monotonic, termination)
+            except Exception as error:
+                exit_code = 1
+                print(f"Could not save IMU report: {error}")
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

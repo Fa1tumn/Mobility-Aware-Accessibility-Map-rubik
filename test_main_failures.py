@@ -18,6 +18,9 @@ class PartialDeviceTests(unittest.TestCase):
         gps = {"gps_monotonic": 100.0, "accuracy_m": 2.0, "latitude": 37.5, "longitude": 127.0}
         result = {"surface_label": "asphalt", "surface_confidence": 0.9, "objects_supported": False, "objects": None}
         metrics = {"slope_percent": 5.0, "vibration_frequency_avg_hz": 8.0}
+        samples = [dict(timestamp_s=i / 100, sample_monotonic=98 + i / 100,
+                        ax=0.49, ay=0, az=9.80665, gx=0, gy=0, gz=0)
+                   for i in range(200)]
         operations = {
             "models": (main.inference, "load_models", {}),
             "camera_start": (main.vision, "open_camera", {}),
@@ -25,7 +28,7 @@ class PartialDeviceTests(unittest.TestCase):
             "gps_start": (main.phone, "start_phone", {}),
             "gps_read": (main.phone, "get_gps_at", gps),
             "imu_start": (main.imu, "start_imu", {}),
-            "imu_read": (main.imu, "get_window", []),
+            "imu_read": (main.imu, "get_window", samples),
             "imu_analysis": (main.imu, "analyze_samples", metrics),
             "inference": (main.inference, "analyze_image", result),
         }
@@ -71,6 +74,14 @@ class PartialDeviceTests(unittest.TestCase):
             stack.enter_context(patch.object(upload_supabase, "upload_records", side_effect=fake_upload))
             main.main()
             records = upload_supabase.read_records(database)
+            with storage.sqlite3.connect(database) as connection:
+                raw = connection.execute("SELECT observation_id, payload FROM imu_windows ORDER BY observation_id").fetchall()
+            if failure in ("imu_start", "imu_read"):
+                self.assertEqual(raw, [])
+            else:
+                self.assertEqual([r[0] for r in raw], [r["id"] for r in records])
+                for _, payload in raw:
+                    self.assertEqual(json.loads(payload)["samples"], samples)
         return records, batches
 
     def test_each_device_failure_still_saves_and_uploads(self):

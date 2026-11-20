@@ -84,6 +84,7 @@ def main() -> None:
             reference_monotonic = window["end_monotonic"]
             gps = device_output("GPS", phone.get_gps_at, phone_state, reference_monotonic) if phone_state is not None else None
             imu_result = None
+            samples = None
             if imu_state is not None:
                 samples = device_output("IMU", imu.get_window, imu_state, reference_monotonic)
                 if samples is not None:
@@ -97,12 +98,16 @@ def main() -> None:
             record = combine_data(frame_reference, gps, result, imu_result, reference_monotonic)
             for field in storage.WINDOW_METADATA_FIELDS:
                 record[field] = window[field]
-            record_id = storage.save_record(connection, record)
+            imu_window = imu.snapshot_window(samples) if samples is not None else None
+            record_id = storage.save_record(connection, record, imu_window=imu_window)
             processing_s = time.monotonic() - loop_start
             timing_note = f", infer={timing['total']}ms" if timing else ""
+            slope = record["slope_percent"]
+            slope_note = "NULL" if slope is None else f"{slope:.2f}%"
             print(
                 f"Saved record {record_id}: time={record['record_time']}, "
                 f"surface={record['surface_label']}{timing_note}, "
+                f"slope={slope_note}, imu_samples={len(samples) if samples is not None else 0}, "
                 f"frames={window['inference_count']}/{window['frame_count']}, "
                 f"save={processing_s * 1000:.0f}ms"
             )

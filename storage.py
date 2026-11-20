@@ -11,6 +11,7 @@ CONFIG = {
 def open_database():
     db_path = CONFIG["db_path"]
     connection = sqlite3.connect(db_path)
+    connection.execute("PRAGMA foreign_keys = ON")
     cursor = connection.cursor()
     try:
         cursor.execute("""
@@ -45,6 +46,12 @@ def open_database():
             if name not in columns:
                 kind = "INTEGER" if name.endswith("count") else "TEXT"
                 cursor.execute(f"ALTER TABLE observations ADD COLUMN {name} {kind}")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS imu_windows (
+                observation_id INTEGER PRIMARY KEY REFERENCES observations(id) ON DELETE CASCADE,
+                payload TEXT NOT NULL
+            )
+        """)
         connection.commit()
         cursor.close()
     except Exception:
@@ -53,8 +60,8 @@ def open_database():
     return connection
 
 
-def save_record(connection, record: dict) -> int:
-    """Return the record ID after commit; roll back on failure."""
+def save_record(connection, record: dict, imu_window=None) -> int:
+    """Commit the observation and optional local IMU inputs together."""
 
     cursor = connection.cursor()
     try:
@@ -93,8 +100,12 @@ def save_record(connection, record: dict) -> int:
             objects_json,
             *(record.get(field) for field in WINDOW_METADATA_FIELDS),
         ))
+        record_id = cursor.lastrowid
+        if imu_window is not None:
+            cursor.execute("INSERT INTO imu_windows (observation_id, payload) VALUES (?, ?)",
+                           (record_id, json.dumps(imu_window, allow_nan=False, separators=(",", ":"))))
         connection.commit()
-        return cursor.lastrowid
+        return record_id
     except Exception:
         connection.rollback()
         raise

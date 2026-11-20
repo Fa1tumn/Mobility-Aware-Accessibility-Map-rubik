@@ -77,13 +77,17 @@ Every BGR pixel: [169, 169, 169]
 
 ### 3. IMU samples
 
-`inject_imu()` generates 200 binary packets representing 100 samples per second. It splits the byte stream partway through a packet to check buffering, then sends the remaining packets together. The first packet is shown in hexadecimal:
+`inject_imu()` generates 200 binary packets representing 100 samples per second,
+including device pitch consistent with the simulated slope. It splits the byte
+stream partway through a packet to check buffering. The packet layout is:
 
 ```text
-55 61 3E FF 00 00 08 08 00 00 00 00 00 00 00 00 00 00 00 00
+55 61 | ax ay az | gx gy gz | roll pitch yaw
 ```
 
-`55 61` identifies a sample. The remaining bytes hold nine signed, little-endian 16-bit values: acceleration XYZ, angular velocity XYZ, and angle XYZ. `decode_packet()` converts acceleration and angular velocity into this dictionary; angles are currently unused:
+`55 61` identifies a sample. The remaining bytes hold nine signed, little-endian
+16-bit values: acceleration XYZ, angular velocity XYZ, and angle XYZ.
+`decode_packet()` converts all nine fields. An illustrative decoded sample is:
 
 ```json
 {
@@ -93,7 +97,10 @@ Every BGR pixel: [169, 169, 169]
   "az": 9.844957,
   "gx": 0.0,
   "gy": 0.0,
-  "gz": 0.0
+  "gz": 0.0,
+  "roll_deg": 0.0,
+  "pitch_deg": 5.43,
+  "yaw_deg": 0.0
 }
 ```
 
@@ -108,7 +115,21 @@ The packets pass through `receive_data()`, `decode_packet()` and `add_sample()`.
 }
 ```
 
-Slope is calculated directly as `100 * mean(ax) / hypot(mean(ay), mean(az))`, without rejecting motion, vibration, gravity-magnitude deviations, or negative mean Z acceleration. Acceleration during motion can affect the estimate. Average vibration frequency is the power-weighted mean from 1 to 40 Hz of the acceleration magnitude signal, with at least 80 samples/s. These values are calculated from the samples. The slope/frequency targets are parameters used to generate the test packets.
+Slope uses the device's fused Roll/Pitch output. Z-Y-X Euler angles reconstruct
+the up vector in sensor coordinates; the saved mounting reference rotates it
+into vehicle coordinates, keeping projected sensor x as forward. The resulting
+forward tilt is continuously smoothed on sample receipt with an exponential
+filter (`slope_filter_tau_s=0.25`), then averaged over the two-second window.
+The saved grade is `100 * tan(mean_tilt)`, with positive uphill and negative
+downhill. The filter retains state across windows and resets after a sample gap
+over 0.1 seconds or a receiver timing reset. It adds lag (~0.75 s for 95% step
+settling, plus window aggregation). Invalid/missing attitude yields NULL slope;
+there is no fallback to acceleration-only slope. Window coverage checks still apply.
+Device fusion can still be affected by sustained motion and mounting movement;
+field accuracy must be checked on known slopes. Average vibration frequency
+continues using raw acceleration magnitude, with a power-weighted mean from
+1 to 40 Hz and at least 80 samples/s. Frequency is not vibration amplitude.
+Old records without angle samples cannot be recomputed using the new method.
 
 ### 4. Surface inference
 
@@ -219,7 +240,22 @@ The detected device is `WT901BLE68`, address `C8:2C:72:8F:2B:2C`. `imu.py` conne
 /home/ubuntu/test/.venv/bin/python -B imu.py
 ```
 
-Bleak and NumPy are already installed in this environment. Each connection configures 100 Hz output and 42 Hz bandwidth, then subscribes to notifications. It does not issue a flash-save or calibration command. Press Ctrl+C to disconnect.
+Bleak and NumPy are already installed in this environment. Each connection
+configures 100 Hz output and 42 Hz bandwidth, then subscribes to notifications.
+It does not issue a flash-save or hardware calibration command.
+
+When run directly, `imu.py` prints metrics once per second from overlapping
+two-second windows. Press **Ctrl+C** to disconnect and write
+`imu_report_<UTC timestamp>.json` in the working directory. This contains every
+accepted decoded sample (including the final partial window), raw Roll/Pitch/Yaw,
+corrected and smoothed tilt, calibration/filter settings, window results,
+summary statistics and the termination reason. The full session is buffered in
+memory until exit, so memory grows with duration; a forced kill or power loss
+cannot produce this exit report. Connection errors also save samples received so far.
+To choose a filename, use `imu.py --report /tmp/my-imu-test.json`.
+Report creation lives in the standalone `main()` only: importing `imu` from
+`main.py` does not create report files or retain this full-session buffer.
+`imu.py --zero` writes only its calibration file.
 
 | Connection setting | Value |
 | --- | --- |
@@ -240,7 +276,17 @@ To compensate for a curved mounting surface, fix the sensor with x pointing forw
 /home/ubuntu/test/.venv/bin/python -B imu.py --zero
 ```
 
-The command collects a recent two-second window, checks for movement, saves the reference gravity direction to local `imu_calibration.json`, and exits. It times out after 30 seconds if no usable window arrives. Both `imu.py` and `main.py` load this reference automatically on subsequent starts. The reference corrects mounting pitch and roll; it cannot determine forward direction, so sensor x must still point forward. Re-run `--zero` after moving the sensor. Never zero on a ramp: that ramp would become the new zero. This is a software mounting reference, not accelerometer factory calibration. The calibration file is excluded from Git and checked against the configured device address.
+The command collects a recent two-second window, checks for movement and stable
+fused attitude, saves both acceleration and fused-attitude reference directions
+to `imu_calibration.json`, and exits. It times out after 30 seconds if no usable
+window arrives. Both `imu.py` and `main.py` load the references automatically.
+Legacy calibration files remain usable as an approximate mounting reference,
+with a startup message recommending `--zero` once for the fused-angle method.
+The reference corrects mounting pitch and roll; it cannot determine forward
+direction, so sensor x must still point forward. Re-run `--zero` after moving
+the sensor. Never zero on a ramp: that ramp would become the new zero.
+This is a software mounting reference, not accelerometer factory calibration.
+The calibration file is excluded from Git and checked against the device address.
 
 Keep `mounting_calibrated` false until mounting and axis alignment have been verified, then enable it in `imu.py`. Without a saved reference the existing sensor-axis calculation is used. Uncalibrated mounting or a zero slope denominator yields NULL slope; no meaningful vibration yields NULL frequency. Missing, stale or unsuitable IMU data also yields NULL metrics. GPS and image collection can continue without valid IMU metrics. Set `device_address` to `None` to disable BLE.
 

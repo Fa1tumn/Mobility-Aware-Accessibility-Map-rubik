@@ -45,6 +45,9 @@ INFERENCE_BACKEND=onnxruntime .venv/bin/python main.py
 
 Weights use PyTorch's restricted `weights_only=True` loader, with additional
 array types allowlisted for the NumPy RNG state stored in the checkpoints.
+The loader also maps the checkpoints' NumPy 2 `numpy._core` reconstruction
+name to the installed NumPy implementation, supporting existing NumPy 1.26 /
+PyTorch 2.5 device environments without disabling the restricted loader.
 Class order, task type, and model architecture are validated; model epochs come
 from the actual checkpoints. No pretrained backbone download or NPU is used.
 References: [PyTorch serialization](https://docs.pytorch.org/docs/stable/notes/serialization.html)
@@ -88,10 +91,61 @@ fields, so this change requires no Supabase table migration. `timing_ms` reports
 mean inference durations across successful frames in a window and is written
 to logs or the standalone JSONL output.
 
+## Diagnosing slope measurements
+
+On the next start, `main.py` creates a local `imu_windows` table in
+`observations.sqlite3`. Each row links to `observations.id` and stores the window's
+individual accelerometer/gyro samples, device Roll/Pitch/Yaw, corrected and
+smoothed tilt, sample timestamps, saved level references, sampling configuration,
+and slope method (`fused_attitude_ema_mean_v1`) as JSON. The
+observation and its inputs commit together. Windows with insufficient samples
+can still have raw inputs even when their saved slope is NULL. Inputs unavailable
+because the IMU failed have no raw row. This is a record of the samples returned
+for each observation window, not a continuous archive of every BLE packet.
+
+Raw inputs stay local; Supabase continues receiving observation summaries.
+Old observations are preserved and have no retroactively reconstructed raw data.
+Storage usage grows with collection time; there is no automatic raw-data deletion.
+
+After collecting a short test route, compare recent windows with:
+
+```bash
+/home/ubuntu/test/.venv/bin/python -B inspect_imu_windows.py --limit 30
+```
+
+The report shows the saved slope, fused-angle replay, historical acceleration
+mean and median estimates,
+acceleration-magnitude standard deviation (m/s²), and angular-rate RMS (rad/s).
+Candidate estimates use the recorded calibration, but do not apply the window
+coverage checks; a candidate value does not make a NULL observation valid.
+These diagnostics help investigate impacts and rotation; they do not prove road
+grade or remove sustained acceleration. Use a rigid mount with sensor x forward,
+and repeat `imu.py --zero` while stationary on level ground after moving the mount.
+
+The fused-angle estimator runs continuously with a 0.25-second exponential
+smoothing time constant and converts the two-second mean tilt to percent grade.
+It never substitutes the old acceleration estimator when angles are unavailable.
+Device fusion and smoothing do not guarantee correct road grade during motion.
+
+For a standalone experiment, stop `main.py`, set the zero once on level ground,
+then run the IMU monitor:
+
+```bash
+/home/ubuntu/test/.venv/bin/python -B imu.py --zero
+/home/ubuntu/test/.venv/bin/python -B imu.py
+```
+
+Ctrl+C saves `imu_report_<UTC timestamp>.json` containing all accepted session
+samples, calibration/settings, window results and summary statistics. Only the
+standalone monitor buffers a full session and creates this report. `main.py`
+continues saving SQLite/Supabase observations without extra report files.
+
 ## Validation
 
 ```bash
-.venv/bin/python -m unittest test_camera_inference test_main_failures test_imu_slope test_upload_supabase
+.venv/bin/python -m unittest test_camera_inference test_main_failures test_imu_slope test_imu_report test_imu_storage test_upload_supabase
+# Load both bundled checkpoints and run a synthetic frame (requires PyTorch).
+.venv/bin/python -m unittest test_surface_model
 .venv/bin/python -c 'import test_pipeline; test_pipeline.run_test("/tmp/pipeline-test.sqlite3")'
 ```
 

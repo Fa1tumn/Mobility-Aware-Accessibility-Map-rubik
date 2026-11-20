@@ -81,7 +81,9 @@ def inject_imu(imu_state, case, frame_monotonic):
             values.append(round(payload[key] / 9.80665 * 32768 / 16))
         for key in ("gx", "gy", "gz"):
             values.append(round(math.degrees(payload[key]) * 32768 / 2000))
-        data = b"\x55\x61" + struct.pack("<9h", *values, 0, 0, 0)
+        # Z-Y-X device pitch is negative for x pointing uphill.
+        pitch_raw = round(-math.degrees(angle) * 32768 / 180)
+        data = b"\x55\x61" + struct.pack("<9h", *values, 0, pitch_raw, 0)
         packets.append(data)
     stream = b"".join(packets)
     with patch.object(imu.time, "monotonic", return_value=frame_monotonic):

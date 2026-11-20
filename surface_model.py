@@ -209,14 +209,25 @@ class TorchBackend(Backend):
     def __init__(self, model_path, labels, task, device="cpu"):
         import torch
         from torchvision.models.segmentation import lraspp_mobilenet_v3_large
-        from numpy._core.multiarray import _reconstruct
+        from numpy._core.multiarray import _reconstruct as numpy_reconstruct
+
+        # NumPy 1.26 exposes this import but reports numpy.core in __module__.
+        # These checkpoints record numpy._core (NumPy 2). PyTorch 2.5 keys its
+        # allowlist by __module__/__name__ and cannot accept explicit-name tuples.
+        # A local wrapper maps that exact checkpoint name to the installed
+        # NumPy implementation without changing NumPy's function globally.
+        def _reconstruct(*args):
+            return numpy_reconstruct(*args)
+
+        _reconstruct.__module__ = "numpy._core.multiarray"
 
         self.torch = torch
         self.device = torch.device(device)
         # The training checkpoints include NumPy RNG state. Allow only the
         # required array types; keep PyTorch's restricted weights-only loader.
         with torch.serialization.safe_globals([
-            _reconstruct, np.ndarray, np.dtype, type(np.dtype("uint32")),
+            _reconstruct, numpy_reconstruct, np.ndarray, np.dtype,
+            type(np.dtype("uint32")),
         ]):
             checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
         if checkpoint.get("names") != labels:
