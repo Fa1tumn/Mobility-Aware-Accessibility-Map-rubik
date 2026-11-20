@@ -16,9 +16,27 @@ def open_camera():
     import cv2
     import numpy as np
 
+    camera_options = [f"camera={CONFIG['camera_id']}"]
+    exposure_compensation = os.environ.get("CAMERA_EXPOSURE_COMPENSATION")
+    if exposure_compensation:
+        error_message = "CAMERA_EXPOSURE_COMPENSATION must be an integer from -12 to 12."
+        try:
+            exposure_steps = int(exposure_compensation)
+        except ValueError as error:
+            raise ValueError(error_message) from error
+        if not -12 <= exposure_steps <= 12:
+            raise ValueError(error_message)
+        camera_options.append(f"exposure-compensation={exposure_steps}")
+
+    exposure_metering = os.environ.get("CAMERA_EXPOSURE_METERING")
+    if exposure_metering:
+        if exposure_metering not in ("average", "center-weighted"):
+            raise ValueError("CAMERA_EXPOSURE_METERING must be average or center-weighted.")
+        camera_options.append(f"exposure-metering={exposure_metering}")
+
     command = [
         "gst-launch-1.0", "-q", "-e",
-        "qtiqmmfsrc", f"camera={CONFIG['camera_id']}", "!",
+        "qtiqmmfsrc", *camera_options, "!",
         "video/x-raw,format=NV12,width=1280,height=720", "!",
         "videorate", "!", "video/x-raw,framerate=30/1", "!",
         "queue", "max-size-buffers=2", "leaky=downstream", "!",
