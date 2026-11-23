@@ -52,6 +52,8 @@ def load_spec(spec_path: Path = SPEC_PATH) -> dict:
 
 def model_version(spec: dict) -> str:
     """Stable identifier stored alongside each record for traceability."""
+    if spec.get("version"):
+        return spec["version"]
     area = spec["models"]["area"]
     material = spec["models"]["material"]
     return (
