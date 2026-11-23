@@ -1,6 +1,8 @@
 # Mobility-Aware-Accessibility-Map-rubik
 
-Current collection runs both Area + Material checkpoints on camera frames and
+Current collection uses center-weighted automatic exposure with the camera's factory exposure curve.
+Edit [camera_config.json](camera_config.json) to set exposure and local photo saving.
+It selects full frames by lower-center road sharpness, runs both Area + Material checkpoints, and
 aggregates successful frame predictions into fixed two-second windows. See
 [checkpoint camera inference](docs/checkpoint-camera-inference.md) for setup,
 the standalone JSONL script, timing rules, and validation. PyTorch CPU is the

@@ -1,3 +1,5 @@
+import json
+import math
 import os
 import queue
 import signal
@@ -6,18 +8,41 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 CONFIG = {
     "camera_id": 0,
 }
 
 
-def open_camera():
-    import cv2
-    import numpy as np
+CAMERA_CONFIG_PATH = Path(__file__).resolve().with_name("camera_config.json")
 
+
+def load_camera_config():
+    """Read the shared capture settings once at collection startup."""
+    try:
+        settings = json.loads(CAMERA_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Could not read {CAMERA_CONFIG_PATH}: {error}") from error
+
+    types = {"exposure_metering": str, "max_exposure_us": int, "exposure_compensation": int,
+             "save_sharp_frames": bool, "save_rejected_frames": bool, "sharp_frame_dir": str}
+    if not isinstance(settings, dict):
+        raise ValueError(f"{CAMERA_CONFIG_PATH} must contain a JSON object.")
+    for key, expected in types.items():
+        if type(settings.get(key)) is not expected:
+            raise ValueError(f"{CAMERA_CONFIG_PATH}: {key} must be a {expected.__name__}.")
+    if not settings["sharp_frame_dir"].strip():
+        raise ValueError(f"{CAMERA_CONFIG_PATH}: sharp_frame_dir must be a nonempty path.")
+    return settings
+
+
+def camera_source_options(settings=None):
+    """Build qtiqmmfsrc properties for center-weighted auto exposure with an optional shutter cap."""
+    if settings is None:
+        settings = load_camera_config()
     camera_options = [f"camera={CONFIG['camera_id']}"]
-    exposure_compensation = os.environ.get("CAMERA_EXPOSURE_COMPENSATION")
+    exposure_compensation = os.environ.get("CAMERA_EXPOSURE_COMPENSATION") or settings["exposure_compensation"]
     if exposure_compensation:
         error_message = "CAMERA_EXPOSURE_COMPENSATION must be an integer from -12 to 12."
         try:
@@ -28,12 +53,41 @@ def open_camera():
             raise ValueError(error_message)
         camera_options.append(f"exposure-compensation={exposure_steps}")
 
-    exposure_metering = os.environ.get("CAMERA_EXPOSURE_METERING")
-    if exposure_metering:
-        if exposure_metering not in ("average", "center-weighted"):
-            raise ValueError("CAMERA_EXPOSURE_METERING must be average or center-weighted.")
-        camera_options.append(f"exposure-metering={exposure_metering}")
+    metering = os.environ.get("CAMERA_EXPOSURE_METERING") or settings["exposure_metering"]
+    if metering not in ("average", "center-weighted"):
+        raise ValueError("CAMERA_EXPOSURE_METERING must be average or center-weighted.")
+    camera_options.extend([f"exposure-metering={metering}", "exposure-mode=auto"])
 
+    # Qualcomm's three-point AE table increases shutter time first, then gain.
+    # Each exposure index step represents a factor of 1.03 in time * gain.
+    message = "CAMERA_MAX_EXPOSURE_US must be 0 (factory AE) or 11 to 33333 microseconds."
+    try:
+        max_us = int(os.environ.get("CAMERA_MAX_EXPOSURE_US", settings["max_exposure_us"]))
+    except ValueError as error:
+        raise ValueError(message) from error
+    if max_us:
+        if not 11 <= max_us <= 33333:
+            raise ValueError(message)
+        max_ns = max_us * 1000
+        time_index = math.log(max_ns / 10040, 1.03)
+        gain_index = time_index + math.log(32, 1.03)
+        camera_options.append(
+            "custom-exposure-table=org.codeaurora.qcamera3.exposuretable,"
+            "isValid=(boolean)true,sensitivityCorrectionFactor=(double)1.0,kneeCount=(int)3,"
+            "gainKneeEntries=(double)<1.0,1.0,32.0>,"
+            f"expTimeKneeEntries=(int)<10040,{max_ns},{max_ns}>,"
+            "incrementPriorityKneeEntries=(int)<1,1,1>,"
+            f"expIndexKneeEntries=(double)<0.0,{time_index:.4f},{gain_index:.4f}>,"
+            "thresAntiBandingMinExpTimePct=(double)0.97;"
+        )
+    return camera_options
+
+
+def open_camera(settings=None):
+    import cv2
+    import numpy as np
+
+    camera_options = camera_source_options(settings)
     command = [
         "gst-launch-1.0", "-q", "-e",
         "qtiqmmfsrc", *camera_options, "!",
@@ -105,6 +159,7 @@ def _read_frames(camera, cv2, np) -> None:
                 # Timestamp decoding, not exposure or the main loop queue read.
                 frame = {
                     "image": image,
+                    "jpeg_bytes": jpeg_bytes,
                     "frame_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "frame_monotonic": time.monotonic(),
                 }

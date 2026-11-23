@@ -201,7 +201,7 @@ def test_full_pipeline(database_path):
         camera["frames"].put(frame)
 
         fake_model, inference_calls = build_fake_surface_model(case)
-        def single_window(*args):
+        def single_window(*args, **kwargs):
             rows = [inference.analyze_image(frame["image"], {"surface": fake_model}) for _ in range(2)]
             yield {
                 "window_start_time": (datetime.fromisoformat(frame["frame_time"].replace("Z", "+00:00")) - timedelta(seconds=2)).isoformat(),

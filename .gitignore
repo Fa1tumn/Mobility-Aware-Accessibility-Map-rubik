@@ -18,6 +18,7 @@ observations.sqlite3
 imu_calibration.json
 imu_calibration.json.tmp
 imu_report_*.json
+/sharp_frames/
 
 # OS / editor
 .DS_Store

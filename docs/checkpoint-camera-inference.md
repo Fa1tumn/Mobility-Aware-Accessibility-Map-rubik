@@ -53,15 +53,52 @@ from the actual checkpoints. No pretrained backbone download or NPU is used.
 References: [PyTorch serialization](https://docs.pytorch.org/docs/stable/notes/serialization.html)
 and [torchvision LR-ASPP API](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.segmentation.lraspp_mobilenet_v3_large.html).
 
+## Road capture defaults
+
+The CSI camera uses center-weighted metering and its factory automatic exposure
+curve for collection and snapshots. The camera adjusts shutter time and gain as
+lighting changes. Longer exposures in dim light can increase motion blur.
+
+Edit [camera_config.json](../camera_config.json) and restart collection to apply
+changes. Set `max_exposure_us` to `0` for the factory automatic exposure curve,
+or to a value from 11 to 33333 for a shutter cap in microseconds (4000 is 4 ms).
+A positive cap also applies in low light. `exposure_metering` accepts
+`center-weighted` or `average`. `exposure_compensation` accepts integer steps
+from -12 to 12. The environment variables `CAMERA_MAX_EXPOSURE_US`,
+`CAMERA_EXPOSURE_METERING` and `CAMERA_EXPOSURE_COMPENSATION` override the
+corresponding JSON values.
+
+Set `save_sharp_frames` and `save_rejected_frames` independently to JSON
+`true` or `false`. Both ship disabled. Both collection entry points accept
+per-run overrides, including `--no-save-sharp-frames` and
+`--no-save-rejected-frames`.
+
+- `--save-sharp-frames` saves the full JPEG selected from each group to
+  `sharp_frames/` before inference. Filenames contain the UTC decode time and
+  lower-center road sharpness score.
+- `--save-rejected-frames` saves each frame that fails the quality check to
+  `sharp_frames/rejected/<reason>/`. Reasons are `underexposed`, `overexposed`,
+  and `flat`.
+
+Set `sharp_frame_dir` to choose the archive root. Relative JSON paths resolve
+from the config file. `SHARP_FRAME_DIR` overrides this path for a run. The separate diagnostic sampler is enabled with `FRAME_SAMPLE_DIR`.
+
 ## Timing and aggregation rules
 
 - Starting at collection startup, the monotonic clock defines consecutive,
   non-overlapping two-second `[start, end)` windows. Frame membership uses the
   camera decode time, not the exposure time or inference completion time.
-- Inference processes the latest frames as often as possible within each window.
-  The camera queue holds only one frame, dropping older frames when the CPU
-  cannot keep up. The actual frame count depends on device performance;
-  processing every frame of a 30 FPS camera stream is not guaranteed.
+- Each group of three observed frames in the same window contributes up to one
+  full image for inference. After the full-frame brightness and contrast checks,
+  the frame with the strongest mean squared Sobel gradient (Tenengrad) in the
+  lower-center road region wins. The region spans the middle half of the width
+  and the bottom half of the height. Ties select the newer frame. A group with
+  eligible frames also contributes when the window ends before three arrive.
+  An all-rejected group contributes no vote. Sampled winners include
+  `road_sharpness` in `samples.jsonl`.
+- The camera keeps only the latest decoded image during inference. Frame counts
+  cover observed candidates. Rejection counts cover quality failures, and
+  inference counts cover successful calls on group winners.
 - Each successful inference casts one vote, including `unknown`. Ties are broken
   by summed confidence, then by lexicographic label order. The output confidence
   is the mean confidence of frames voting for the winning class. Both pixel

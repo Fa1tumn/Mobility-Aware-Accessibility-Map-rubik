@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 import main
 import storage
 import upload_supabase
@@ -14,7 +16,8 @@ import upload_supabase
 
 class PartialDeviceTests(unittest.TestCase):
     def run_pipeline(self, failure=None, iterations=1, upload_failure=False):
-        frame = {"frame_monotonic": 100.0, "frame_time": "2026-11-05T00:00:00Z", "image": object()}
+        image = np.random.default_rng(42).integers(40, 200, (72, 128, 3), dtype=np.uint8)
+        frame = {"frame_monotonic": 100.0, "frame_time": "2026-11-05T00:00:00Z", "image": image}
         gps = {"gps_monotonic": 100.0, "accuracy_m": 2.0, "latitude": 37.5, "longitude": 127.0}
         result = {"surface_label": "asphalt", "surface_confidence": 0.9, "objects_supported": False, "objects": None}
         metrics = {"slope_percent": 5.0, "vibration_frequency_avg_hz": 8.0}
@@ -33,6 +36,7 @@ class PartialDeviceTests(unittest.TestCase):
             "inference": (main.inference, "analyze_image", result),
         }
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            stack.enter_context(patch.dict(main.os.environ, {"SHARP_FRAME_DIR": directory}))
             database = str(Path(directory) / "observations.sqlite3")
             stack.enter_context(patch.dict(storage.CONFIG, {"db_path": database}))
             stack.enter_context(patch.dict(main.os.environ, {"SUPABASE_URL": "https://example.supabase.co", "SUPABASE_SECRET_KEY": "test-key"}))
@@ -40,8 +44,8 @@ class PartialDeviceTests(unittest.TestCase):
             stack.enter_context(patch.object(main.time, "monotonic", side_effect=lambda: now[0]))
             stack.enter_context(patch.object(main.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)))
             real_windows = main.camera_inference.iter_windows
-            def limited_windows(*args):
-                yield from itertools.islice(real_windows(*args), iterations)
+            def limited_windows(*args, **kwargs):
+                yield from itertools.islice(real_windows(*args, **kwargs), iterations)
             stack.enter_context(patch.object(main.camera_inference, "iter_windows",
                 side_effect=limited_windows))
             for name, (module, method, value) in operations.items():
@@ -120,6 +124,7 @@ class PartialDeviceTests(unittest.TestCase):
         self.assertEqual(batches[1], records)
 
     def test_invalid_gps_only_clears_coordinates(self):
+        image = np.random.default_rng(42).integers(40, 200, (72, 128, 3), dtype=np.uint8)
         frame = {"frame_monotonic": 100.0, "frame_time": "now"}
         for timestamp, accuracy in ((90.0, 2.0), (100.0, 20.0)):
             record = main.combine_data(frame, {"gps_monotonic": timestamp, "accuracy_m": accuracy, "latitude": 1, "longitude": 2}, {"surface_label": "asphalt"}, {"slope_percent": 3})

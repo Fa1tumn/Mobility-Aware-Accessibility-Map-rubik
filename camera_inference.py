@@ -1,8 +1,8 @@
 """Camera -> both surface models -> fixed-duration observation windows.
 
 Shared by main.py and the standalone JSONL CLI. Window membership uses frame
-monotonic decode time, never inference completion time. Only the latest camera
-frame is processed, so a slow CPU drops frames instead of queuing old images.
+monotonic decode time, never inference completion time. Road sharpness selects
+one full frame per group for inference.
 """
 import argparse
 from collections import Counter
@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -26,6 +27,9 @@ OVEREXPOSED_MEAN = 240      # 평균 밝기(0~255)가 이보다 크면 과다 �
 OVEREXPOSED_SHARE = 0.6     # 밝기 250 이상 픽셀이 이 비율을 넘어도 과다 노출
 UNDEREXPOSED_MEAN = 15      # 평균 밝기가 이보다 작으면 노출 부족
 FLAT_STD = 6                # 밝기 표준편차가 이보다 작으면 거의 단색(가림, 초점 실패 등)
+
+
+FRAMES_PER_GROUP = 3
 
 
 def utc_string(value):
@@ -93,6 +97,41 @@ def frame_problem(image, stats=None):
     return None
 
 
+def road_sharpness(image):
+    """Mean squared Sobel gradient on the lower-center half-width road region."""
+    import cv2
+
+    height, width = image.shape[:2]
+    road = image[height // 2:, width // 4:max(width // 4 + 1, 3 * width // 4)]
+    gray = cv2.cvtColor(road, cv2.COLOR_BGR2GRAY)
+    dx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    dy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    return float(np.mean(dx * dx + dy * dy))
+
+
+def save_frame(directory, frame, label):
+    """Publish a full JPEG atomically in the local frame archive."""
+    jpeg = frame.get("jpeg_bytes")
+    if jpeg is None:
+        import cv2
+
+        ok, jpeg = cv2.imencode(".jpg", frame["image"])
+        if not ok:
+            raise OSError("Could not encode the frame.")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = str(frame.get("frame_time") or frame["frame_monotonic"]).replace(":", "-")
+    with tempfile.NamedTemporaryFile(dir=directory, prefix=f"{stamp}_{label}_",
+                                     suffix=".part", delete=False) as output:
+        temporary = Path(output.name)
+        try:
+            output.write(jpeg)
+            output.flush()
+            temporary.rename(temporary.with_suffix(".jpg"))
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 class FrameSampler:
     """원인 확인용 프레임 표본 저장. 환경변수 FRAME_SAMPLE_DIR가 있을 때만 켜진다.
 
@@ -142,7 +181,15 @@ class FrameSampler:
         return name
 
 
-def iter_windows(camera, models, window_s=2.0, timing=False, sampler=None):
+def add_frame_archive_options(parser):
+    parser.add_argument("--save-sharp-frames", action=argparse.BooleanOptionalAction, default=None,
+                        help="Save every full frame selected by road sharpness")
+    parser.add_argument("--save-rejected-frames", action=argparse.BooleanOptionalAction, default=None,
+                        help="Save every frame that fails the image quality check")
+
+
+def iter_windows(camera, models, window_s=2.0, timing=False, sampler=None, *,
+                 save_sharp_frames=None, save_rejected_frames=None, camera_config=None):
     """Yield [start, end) windows, including windows with no successful images.
 
     An inference already in progress finishes in its original capture window.
@@ -154,6 +201,14 @@ def iter_windows(camera, models, window_s=2.0, timing=False, sampler=None):
         raise ValueError("window_s must be finite and positive")
     if sampler is None:
         sampler = FrameSampler.from_env()
+    if camera_config is None:
+        camera_config = vision.load_camera_config()
+    if save_sharp_frames is None:
+        save_sharp_frames = camera_config["save_sharp_frames"]
+    if save_rejected_frames is None:
+        save_rejected_frames = camera_config["save_rejected_frames"]
+    configured_dir = vision.CAMERA_CONFIG_PATH.parent / Path(camera_config["sharp_frame_dir"]).expanduser()
+    sharp_dir = Path(os.environ.get("SHARP_FRAME_DIR") or configured_dir).expanduser()
     origin = time.monotonic()
     utc_origin = datetime.now(timezone.utc)
     index = 0
@@ -162,7 +217,36 @@ def iter_windows(camera, models, window_s=2.0, timing=False, sampler=None):
     rejected = Counter()          # 추론하지 않고 버린 프레임 수(이유별)
     last_frame = float("-inf")
 
+    best_frame = None
+    best_stats = None
+
+    def archive(directory, frame, label):
+        try:
+            save_frame(directory, frame, label)
+        except Exception as error:
+            print(f"Could not save frame to {directory}: {error}", file=sys.stderr)
+
+    def infer_best():
+        nonlocal best_frame, best_stats
+        frame, stats = best_frame, best_stats
+        best_frame, best_stats = None, None
+        if frame is None:
+            return
+        if save_sharp_frames:
+            archive(sharp_dir, frame, f"sharpness-{stats['road_sharpness']:.1f}")
+        if models is None:
+            return
+        try:
+            result = inference.analyze_image(frame["image"], models, timing)
+            if result is not None:
+                results.append(result)
+                if sampler is not None:
+                    sampler.maybe_save(frame, index, stats, None, result)
+        except Exception as error:
+            print(f"Image inference unavailable: {error}", file=sys.stderr)
+
     def pack(end=None):
+        infer_best()
         start = origin + index * window_s
         end = origin + (index + 1) * window_s if end is None else end
         return {
@@ -189,7 +273,7 @@ def iter_windows(camera, models, window_s=2.0, timing=False, sampler=None):
                 frame_count = 0
                 rejected = Counter()
                 continue
-            if camera is None or models is None:
+            if camera is None:
                 time.sleep(min(0.1, max(0, end - time.monotonic())))
                 continue
             read_start = time.monotonic()
@@ -220,17 +304,17 @@ def iter_windows(camera, models, window_s=2.0, timing=False, sampler=None):
             problem = frame_problem(frame["image"], stats)
             if problem is not None:
                 rejected[problem] += 1
+                if save_rejected_frames:
+                    archive(sharp_dir / "rejected" / problem, frame, problem)
                 if sampler is not None:
                     sampler.maybe_save(frame, index, stats, problem)
-                continue
-            try:
-                result = inference.analyze_image(frame["image"], models, timing)
-                if result is not None:
-                    results.append(result)
-                    if sampler is not None:
-                        sampler.maybe_save(frame, index, stats, None, result)
-            except Exception as error:
-                print(f"Image inference unavailable: {error}", file=sys.stderr)
+            else:
+                score = road_sharpness(frame["image"])
+                if best_stats is None or score >= best_stats["road_sharpness"]:
+                    stats["road_sharpness"] = score
+                    best_frame, best_stats = frame, stats
+            if frame_count % FRAMES_PER_GROUP == 0:
+                infer_best()
     except KeyboardInterrupt:
         if frame_count:
             yield pack(end=min(time.monotonic(), origin + (index + 1) * window_s))
@@ -244,6 +328,7 @@ def main():
     parser.add_argument("--windows", type=int, default=0, help="Stop after N windows; 0 runs until Ctrl+C")
     parser.add_argument("--output", help="Write JSONL to this file instead of stdout")
     parser.add_argument("--timing", action="store_true")
+    add_frame_archive_options(parser)
     args = parser.parse_args()
     if args.windows < 0 or not math.isfinite(args.window_seconds) or args.window_seconds <= 0:
         parser.error("windows must be nonnegative and window-seconds finite and positive")
@@ -251,10 +336,13 @@ def main():
     vision.CONFIG["camera_id"] = args.camera_id
     models = camera = output = windows = None
     try:
+        camera_config = vision.load_camera_config()
         models = inference.load_models()
-        camera = vision.open_camera()
+        camera = vision.open_camera(camera_config)
         output = open(args.output, "w", encoding="utf-8") if args.output else sys.stdout
-        windows = iter_windows(camera, models, args.window_seconds, args.timing)
+        windows = iter_windows(camera, models, args.window_seconds, args.timing,
+                               save_sharp_frames=args.save_sharp_frames,
+                               save_rejected_frames=args.save_rejected_frames, camera_config=camera_config)
         for count, window in enumerate(windows, 1):
             output.write(json.dumps(window, ensure_ascii=False, allow_nan=False) + "\n")
             output.flush()

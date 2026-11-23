@@ -1,3 +1,4 @@
+import argparse
 import os
 import time
 from datetime import datetime, timezone
@@ -55,7 +56,7 @@ def combine_data(frame, gps, result, imu_result=None, reference_monotonic=None):
     }
 
 
-def main() -> None:
+def main(*, save_sharp_frames=None, save_rejected_frames=None) -> None:
     phone_state = None
     imu_state = None
     camera = None
@@ -63,6 +64,7 @@ def main() -> None:
     models = None
     windows = None
     try:
+        camera_config = vision.load_camera_config()
         supabase_url = os.environ.get("SUPABASE_URL", "https://vptvvtxqqocpaepziqmz.supabase.co/rest/v1/")
         api_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
         upload_enabled = bool(supabase_url and api_key)
@@ -73,11 +75,12 @@ def main() -> None:
         connection = storage.open_database()
         phone_state = device_output("GPS receiver", phone.start_phone)
         imu_state = device_output("IMU receiver", imu.start_imu)
-        camera = device_output("Camera", vision.open_camera)
+        camera = device_output("Camera", vision.open_camera, camera_config)
         print("Pipeline started. Press Ctrl+C to stop.")
 
         windows = camera_inference.iter_windows(
             camera, models, CONFIG["interval_s"], CONFIG["timing"],
+            camera_config=camera_config, save_sharp_frames=save_sharp_frames, save_rejected_frames=save_rejected_frames,
         )
         for window in windows:
             loop_start = time.monotonic()
@@ -167,4 +170,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Collect mobility observations.")
+    camera_inference.add_frame_archive_options(parser)
+    args = parser.parse_args()
+    main(save_sharp_frames=args.save_sharp_frames, save_rejected_frames=args.save_rejected_frames)
