@@ -22,7 +22,7 @@ import surface_model
 
 CONFIG = {
     "backend": os.environ.get("INFERENCE_BACKEND", "torch"),  # torch / onnxruntime / qnn
-    "model_dir": str(surface_model.MODEL_DIR),
+    "model_dir": os.environ.get("MODEL_DIR", str(surface_model.MODEL_DIR)),
     "torch_device": os.environ.get("TORCH_DEVICE", "cpu"),
     "torch_threads": int(os.environ.get("TORCH_THREADS", "2")),
     # onnxruntime backend
