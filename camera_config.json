@@ -1,7 +1,7 @@
 {
   "exposure_metering": "center-weighted",
   "max_exposure_us": 0,
-  "exposure_compensation": 0,
+  "exposure_compensation": -3,
   "save_sharp_frames": true,
   "save_rejected_frames": true,
   "sharp_frame_dir": "sharp_frames"

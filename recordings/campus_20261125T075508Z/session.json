@@ -1,0 +1,10 @@
+{
+  "mode": "route",
+  "start_utc": "2026-11-25T07:55:13.121111+00:00",
+  "start_monotonic": 400.257091087,
+  "target_fps": 5,
+  "imu_hz": 100,
+  "status": "operator_stop",
+  "duration_s": 959.4967084920002,
+  "imu_timing_resets": 0
+}

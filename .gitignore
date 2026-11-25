@@ -19,6 +19,8 @@ imu_calibration.json
 imu_calibration.json.tmp
 imu_report_*.json
 /sharp_frames/
+/recordings/*
+!/recordings/campus_20261125T075508Z/
 
 # OS / editor
 .DS_Store

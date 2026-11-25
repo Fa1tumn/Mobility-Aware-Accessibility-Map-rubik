@@ -1,5 +1,8 @@
 # Mobility-Aware-Accessibility-Map-rubik
 
+For the fixed-interval vs. IMU-based frame-selection experiment, use the
+[Pi recording and Mac handoff guide](docs/replay-collection.md).
+
 Current collection uses center-weighted automatic exposure with the camera's factory exposure curve.
 Edit [camera_config.json](camera_config.json) to set exposure and local photo saving.
 It selects full frames by lower-center road sharpness, runs both Area + Material checkpoints, and
