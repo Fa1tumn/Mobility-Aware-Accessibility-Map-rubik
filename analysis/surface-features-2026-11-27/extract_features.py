@@ -180,6 +180,13 @@ for folder in sorted((ROOT/'coast').glob('*/*')):
         moving=mean_interval(t,a[:,0],release,stop);rest=mean_interval(t,a[:,0],restlo,resthi)
         decel=rest-moving if moving is not None and rest is not None else None
         r['ax_decel_proxy_mps2']=decel
+        # 자세(pitch)가 바뀌면 x축에 중력이 섞인다(1°당 약 0.17m/s²). x축 중력 성분 -g·sin(pitch)를 빼서 다시 계산한다.
+        # 부호는 데이터로 골랐다: 이 보정에서 음수 감속이 7→3회로 줄고, 감속×시간(초기 속도 추정)이 걷는 속도(약 1.1m/s)에 모인다.
+        lin=a[:,0]+9.80665*np.sin(np.deg2rad(d.pitch_deg.to_numpy()))
+        mv2=mean_interval(t,lin,release,stop);rs2=mean_interval(t,lin,restlo,resthi)
+        dc=rs2-mv2 if mv2 is not None and rs2 is not None else None
+        r['ax_decel_pitch_corrected_mps2']=dc
+        r['initial_speed_estimate_mps']=dc*dur if dc is not None else None   # 평균 감속 × 주행 시간 = 손 뗄 때 속도
         alt=[]
         for tag,startoff,endoff in [('early',.25,1.25),('late',1.5,3.5)]:
             baseline=mean_interval(t,a[:,0],stop+startoff,stop+endoff) if stop+endoff<nextrelease else None
@@ -383,6 +390,8 @@ definitions={
  'acc_norm_p95_p5_mps2':'95th–5th percentile span of raw acceleration magnitude; robust unfiltered variability.',
  'rms_mps2':'sqrt(mean(sum of squared 1–40Hz filtered acceleration axes)); body-frame resultant, not ISO weighted comfort',
  'ax_decel_proxy_mps2':'mean raw ax in stop+0.5..2.5s minus mean raw ax during release..stop, time weighted; axis and pitch sensitive',
+ 'ax_decel_pitch_corrected_mps2':'ax에서 x축 중력 성분(-g·sin(pitch))을 빼고 같은 방식(정지 평균 - 주행 평균)으로 구한 감속도. 장착 0점 보정은 없음',
+ 'initial_speed_estimate_mps':'보정 감속도 × 주행 시간. 같은 속도로 밀었다면 시험끼리 비슷해야 하는 검증용 값',
  'decel_screen_pass':'Exploratory quality screen only: duration>=2s, sufficient nonoverlapping rest, positive proxy, rest acceleration std<=0.15m/s² and gyro RMS<=0.05rad/s, pitch change<=1deg, gyro-z RMS<=0.1rad/s. Passing does not validate friction.',
  'dominant_hz':'Maximum of summed axis Welch PSD in 1–40Hz; resolution 0.5Hz for >=2s samples',
  'centroid_hz':'PSD weighted average frequency in 1–40Hz',
