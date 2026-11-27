@@ -83,17 +83,23 @@ def camera_source_options(settings=None):
     return camera_options
 
 
-def open_camera(settings=None):
-    import cv2
-    import numpy as np
-
+def open_camera(settings=None, *, on_jpeg=None):
+    """Pass on_jpeg to save every complete JPEG."""
     camera_options = camera_source_options(settings)
+    rate_and_queue = ["queue", "max-size-buffers=2", "!"]
+    cv2 = np = None
+    if on_jpeg is None:
+        import cv2
+        import numpy as np
+        rate_and_queue = [
+            "videorate", "!", "video/x-raw,framerate=30/1", "!",
+            "queue", "max-size-buffers=2", "leaky=downstream", "!",
+        ]
     command = [
         "gst-launch-1.0", "-q", "-e",
         "qtiqmmfsrc", *camera_options, "!",
         "video/x-raw,format=NV12,width=1280,height=720", "!",
-        "videorate", "!", "video/x-raw,framerate=30/1", "!",
-        "queue", "max-size-buffers=2", "leaky=downstream", "!",
+        *rate_and_queue,
         "jpegenc", "quality=80", "!", "fdsink", "fd=1", "sync=false",
     ]
     process = subprocess.Popen(
@@ -110,6 +116,7 @@ def open_camera(settings=None):
         "stop_event": threading.Event(),
         "thread": None,
         "error": None,
+        "on_jpeg": on_jpeg,
     }
     try:
         camera["thread"] = threading.Thread(
@@ -124,16 +131,20 @@ def open_camera(settings=None):
 
 def _read_frames(camera, cv2, np) -> None:
     buffer = bytearray()
+    on_jpeg = camera.get("on_jpeg")
     try:
-        while not camera["stop_event"].is_set():
+        # Read the remaining JPEGs on shutdown.
+        while on_jpeg is not None or not camera["stop_event"].is_set():
             chunk = os.read(camera["process"].stdout.fileno(), 65536)
             if not chunk:
-                if not camera["stop_event"].is_set():
+                if on_jpeg is not None and buffer:
+                    camera["error"] = "GStreamer ended with an incomplete JPEG."
+                elif not camera["stop_event"].is_set():
                     camera["error"] = "GStreamer image stream ended. Check stderr for details."
                 break
             buffer.extend(chunk)
 
-            while not camera["stop_event"].is_set():
+            while on_jpeg is not None or not camera["stop_event"].is_set():
                 start = buffer.find(b"\xff\xd8")
                 if start < 0:
                     # Preserve a trailing FF byte if the JPEG start marker is split.
@@ -143,12 +154,17 @@ def _read_frames(camera, cv2, np) -> None:
                 if end < 0:
                     del buffer[:start]
                     if len(buffer) > 16 * 1024 * 1024:
+                        if on_jpeg is not None:
+                            raise ValueError("Incomplete JPEG exceeded 16 MiB.")
                         buffer.clear()
                         print("JPEG buffer is too large; discarded the incomplete frame.", file=sys.stderr)
                     break
 
                 jpeg_bytes = bytes(buffer[start:end + 2])
                 del buffer[:end + 2]
+                if on_jpeg is not None:
+                    on_jpeg(jpeg_bytes, time.monotonic(), datetime.now(timezone.utc).isoformat())
+                    continue
                 image = cv2.imdecode(
                     np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR,
                 )
@@ -174,7 +190,7 @@ def _read_frames(camera, cv2, np) -> None:
                         pass
                     camera["frames"].put_nowait(frame)
     except Exception as error:
-        if not camera["stop_event"].is_set():
+        if on_jpeg is not None or not camera["stop_event"].is_set():
             camera["error"] = f"Camera reader failed: {error}"
 
 
@@ -210,6 +226,8 @@ def close_camera(camera) -> None:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=2)
+            if camera.get("on_jpeg") is not None and not camera["error"]:
+                camera["error"] = "GStreamer timed out flushing the archive."
         except ProcessLookupError:
             process.wait(timeout=2)
 
