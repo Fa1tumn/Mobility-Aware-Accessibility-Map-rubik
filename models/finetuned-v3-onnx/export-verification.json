@@ -1,0 +1,8 @@
+{
+  "checkpoint_epoch": 5,
+  "input": "seed42 normal tensor 1x3x360x640",
+  "max_abs_logit_error": 3.147125244140625e-05,
+  "argmax_agreement": 1.0,
+  "adapter_model_version": "campus-material-ft-v3-20261127-e5",
+  "pi_validated": false
+}
