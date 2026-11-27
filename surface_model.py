@@ -21,6 +21,17 @@ confidence >= area_sidewalk_threshold AND the Material head's top class
 confidence >= material_threshold. The dominant accepted material becomes
 `surface_label`; if no pixel qualifies the label is `unknown`. Stairs and
 damage heads are out of scope for this package.
+
+Optional region policy (policy["region"], default "sidewalk"):
+
+    "sidewalk"     -- the rule above (Area sidewalk >= threshold, whole frame).
+    "wheel_ahead"  -- ignore the Area head and vote only over the lower-center
+                      region the wheels are about to roll over: the bottom half
+                      of the frame x the middle half of its width, the same
+                      region camera_inference.road_sharpness() scores. Pixels
+                      there count when Material confidence >= material_threshold.
+                      The Area model is not run, area_accept_ratio is None, and
+                      material_accept_ratio is the accepted share of that region.
 """
 
 from __future__ import annotations
@@ -32,6 +43,22 @@ import numpy as np
 
 MODEL_DIR = Path(__file__).resolve().parent / "models" / "area-surface-v3"
 SPEC_PATH = MODEL_DIR / "model-spec.json"
+
+REGION_SIDEWALK = "sidewalk"
+REGION_WHEEL_AHEAD = "wheel_ahead"
+REGIONS = (REGION_SIDEWALK, REGION_WHEEL_AHEAD)
+
+
+def policy_region(spec: dict) -> str:
+    region = spec["policy"].get("region", REGION_SIDEWALK)
+    if region not in REGIONS:
+        raise ValueError(f"Unknown policy region {region!r}; expected one of {REGIONS}.")
+    return region
+
+
+def wheel_ahead_slices(height: int, width: int) -> tuple:
+    """Lower half x middle half of the frame (same as road_sharpness)."""
+    return slice(height // 2, height), slice(width // 4, max(width // 4 + 1, 3 * width // 4))
 
 
 def load_spec(spec_path: Path = SPEC_PATH) -> dict:
@@ -64,6 +91,8 @@ def model_version(spec: dict) -> str:
 
 def policy_version(spec: dict) -> str:
     policy = spec["policy"]
+    if policy_region(spec) == REGION_WHEEL_AHEAD:
+        return f"wheel_ahead(lower_half,center_half)&material>={policy['material_threshold']}"
     return (
         f"area_sidewalk>={policy['area_sidewalk_threshold']}"
         f"&material>={policy['material_threshold']}"
@@ -125,8 +154,43 @@ def decode_logits(logits: np.ndarray) -> tuple:
     return class_id, confidence
 
 
-def apply_policy(area_logits: np.ndarray, material_logits: np.ndarray, spec: dict) -> dict:
+def _vote(material_class, material_confidence, accepted, material_labels):
+    if not accepted.any():
+        return "unknown", None
+    accepted_class = material_class[accepted]
+    accepted_conf = material_confidence[accepted]
+    counts = np.bincount(accepted_class, minlength=len(material_labels))
+    dominant = int(counts.argmax())
+    # Mean confidence of the pixels backing the chosen material.
+    return material_labels[dominant], float(accepted_conf[accepted_class == dominant].mean())
+
+
+def apply_wheel_ahead_policy(material_logits: np.ndarray, spec: dict) -> dict:
+    """Vote over the lower-center region only; the Area head is not used."""
+    material_labels = spec["models"]["material"]["labels"]
+    material_threshold = float(spec["policy"]["material_threshold"])
+    material_class, material_confidence = decode_logits(material_logits)
+    rows, cols = wheel_ahead_slices(*material_class.shape)
+    region_class = material_class[rows, cols]
+    region_conf = material_confidence[rows, cols]
+    accepted = region_conf >= material_threshold
+    surface_label, surface_confidence = _vote(region_class, region_conf, accepted, material_labels)
+    return {
+        "surface_label": surface_label,
+        "surface_confidence": surface_confidence,
+        "area_accept_ratio": None,
+        "material_accept_ratio": float(accepted.mean()) if accepted.size else 0.0,
+        "model_version": model_version(spec),
+        "policy_version": policy_version(spec),
+        "objects_supported": False,
+        "objects": None,
+    }
+
+
+def apply_policy(area_logits, material_logits: np.ndarray, spec: dict) -> dict:
     """Combine the two heads into one surface observation per the spec policy."""
+    if policy_region(spec) == REGION_WHEEL_AHEAD:
+        return apply_wheel_ahead_policy(material_logits, spec)
     area_labels = spec["models"]["area"]["labels"]
     material_labels = spec["models"]["material"]["labels"]
     policy = spec["policy"]
@@ -150,16 +214,8 @@ def apply_policy(area_logits: np.ndarray, material_logits: np.ndarray, spec: dic
     material_accepted = area_accepted & (material_confidence >= material_threshold)
     material_accept_ratio = float(material_accepted.mean()) if total_pixels else 0.0
 
-    surface_label = "unknown"
-    surface_confidence = None
-    if material_accepted.any():
-        accepted_class = material_class[material_accepted]
-        accepted_conf = material_confidence[material_accepted]
-        counts = np.bincount(accepted_class, minlength=len(material_labels))
-        dominant = int(counts.argmax())
-        surface_label = material_labels[dominant]
-        # Mean confidence of the pixels backing the chosen material.
-        surface_confidence = float(accepted_conf[accepted_class == dominant].mean())
+    surface_label, surface_confidence = _vote(
+        material_class, material_confidence, material_accepted, material_labels)
 
     return {
         "surface_label": surface_label,
@@ -303,10 +359,12 @@ class SurfaceModel:
         When timing is True, the result carries a 'timing_ms' dict with the
         preprocess / area / material / postprocess / total wall-clock split,
         for measuring the on-device CPU cost of the two-model pipeline.
+        With policy region "wheel_ahead" the Area model is skipped (area = 0 ms).
         """
+        use_area = policy_region(self.spec) != REGION_WHEEL_AHEAD
         if not timing:
             input_tensor = preprocess(image, self.spec)
-            area_logits = self.area_backend.run(input_tensor)
+            area_logits = self.area_backend.run(input_tensor) if use_area else None
             material_logits = self.material_backend.run(input_tensor)
             return apply_policy(area_logits, material_logits, self.spec)
 
@@ -315,7 +373,7 @@ class SurfaceModel:
         t0 = perf_counter()
         input_tensor = preprocess(image, self.spec)
         t1 = perf_counter()
-        area_logits = self.area_backend.run(input_tensor)
+        area_logits = self.area_backend.run(input_tensor) if use_area else None
         t2 = perf_counter()
         material_logits = self.material_backend.run(input_tensor)
         t3 = perf_counter()
