@@ -1,0 +1,30 @@
+{
+  "sample_rate_config_hz": 100,
+  "bandpass_hz": [
+    1,
+    40
+  ],
+  "filter": "Butterworth order4 sosfiltfilt offline",
+  "welch_seconds": 2,
+  "welch_overlap": 0.5,
+  "stft_hop_seconds": 0.5,
+  "wavelet": "db4 level4 periodization",
+  "shock_thresholds_mps2": [
+    5,
+    10,
+    20
+  ],
+  "coast_edge_trim_seconds": 0.25,
+  "user_confirmed_equal_initial_speed": true,
+  "initial_speed_instrumented": false,
+  "user_confirmed_equal_load": true,
+  "mass_kg": null,
+  "coast_to_frames_location_mapping_verified": false,
+  "libraries": {
+    "numpy": "2.5.5",
+    "scipy": "1.18.1",
+    "pandas": "3.1.1",
+    "matplotlib": "3.11.2",
+    "PyWavelets": "1.10.0"
+  }
+}

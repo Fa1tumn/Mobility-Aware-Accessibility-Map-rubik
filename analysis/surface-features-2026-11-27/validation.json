@@ -1,0 +1,13 @@
+{
+  "source_files_unchanged": 245,
+  "raw_packet_samples_checked": 3535,
+  "synthetic_10hz_peak": 10.0,
+  "synthetic_rms": 0.7071067732318436,
+  "base_feature_count": 61,
+  "coast_trials": 46,
+  "frame_windows": 2351,
+  "geojson_points": 2351,
+  "band_and_wavelet_fractions_sum_to_one": true,
+  "acquisition_decel_reproduced": true,
+  "no_invented_force_or_friction": true
+}

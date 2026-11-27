@@ -1,0 +1,255 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>8종 노면 관성·진동 특징</title><style>body{font-family:-apple-system,sans-serif;max-width:1200px;margin:28px auto;padding:0 18px;line-height:1.65;color:#1d3249}table{border-collapse:collapse;font-size:13px;width:100%}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:right}th{background:#edf3f9}img{max-width:100%;height:auto}.scroll{overflow:auto}.note{background:#fff1d5;padding:16px}li{margin:9px 0}a{color:#1761a8}</style><h1>8종 노면 관성·진동 특징 분석</h1><p>관성 시험 46회(측정 오류 4회 제외 후 42회) · imu 구간 12개 · 시각 기록 20개 세션 · 2초 특징 2,351개. 원본 유지.</p><p class="note">진동 특징 추출 완료. 마찰력과 굴림 저항계수는 현재 자료만으로 확정할 수 없습니다. 사진 기록과 관성 기록의 장소 대응은 미확인입니다.</p><div class="scroll"><table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>관성 장소 ID</th>
+      <th>시험 수</th>
+      <th>관성 시간 중앙값(초)</th>
+      <th>최소(초)</th>
+      <th>최대(초)</th>
+      <th>진동 RMS 중앙값(m/s²)</th>
+      <th>중심 주파수(Hz)</th>
+      <th>축 감속 대리지표(m/s²)</th>
+      <th>탐색 검사 통과 수</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>block</td>
+      <td>5</td>
+      <td>3.966</td>
+      <td>3.253</td>
+      <td>4.742</td>
+      <td>1.155</td>
+      <td>22.594</td>
+      <td>0.060</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>block1</td>
+      <td>7</td>
+      <td>4.711</td>
+      <td>4.018</td>
+      <td>5.103</td>
+      <td>2.441</td>
+      <td>22.809</td>
+      <td>0.084</td>
+      <td>2</td>
+    </tr>
+    <tr>
+      <td>block2</td>
+      <td>5</td>
+      <td>5.547</td>
+      <td>4.365</td>
+      <td>6.833</td>
+      <td>2.829</td>
+      <td>25.187</td>
+      <td>0.749</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>block3</td>
+      <td>5</td>
+      <td>5.289</td>
+      <td>5.102</td>
+      <td>6.543</td>
+      <td>2.295</td>
+      <td>21.904</td>
+      <td>0.595</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>block4</td>
+      <td>4</td>
+      <td>5.954</td>
+      <td>5.032</td>
+      <td>7.075</td>
+      <td>3.138</td>
+      <td>24.681</td>
+      <td>0.380</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>block5</td>
+      <td>5</td>
+      <td>4.544</td>
+      <td>3.536</td>
+      <td>5.757</td>
+      <td>3.632</td>
+      <td>24.636</td>
+      <td>0.664</td>
+      <td>0</td>
+    </tr>
+    <tr>
+      <td>red_good</td>
+      <td>5</td>
+      <td>4.485</td>
+      <td>4.101</td>
+      <td>5.218</td>
+      <td>2.353</td>
+      <td>29.967</td>
+      <td>0.632</td>
+      <td>1</td>
+    </tr>
+    <tr>
+      <td>red_worst</td>
+      <td>6</td>
+      <td>4.384</td>
+      <td>3.219</td>
+      <td>6.136</td>
+      <td>7.239</td>
+      <td>21.177</td>
+      <td>0.049</td>
+      <td>0</td>
+    </tr>
+  </tbody>
+</table></div><p>표는 장소별 시험 중앙값입니다. 품질 플래그가 있는 시험도 보존하며, 통과 수는 탐색 검사이지 물리적 타당성 인증이 아닙니다.</p><p><b>핵심 관찰:</b> red_worst는 red_good보다 진동 RMS 중앙값이 약 3.1배이지만 관성 시간 중앙값은 4.38초와 4.48초입니다. 진동과 굴림 지속성은 별도 지표입니다. 측정 오류로 안내된 4회는 요약과 그림에서 뺐습니다. 남은 42회 중 감속 대리값이 0 이하인 시험은 7회, 정지 구간 움직임 기준을 넘은 시험은 34회입니다. 기준을 넘었다고 바로 무효는 아니며 정지 구간 재확인이 필요하다는 뜻입니다. 2초 미만 시험을 뺀 결과는 CSV의 ge2s 열에 있습니다.</p><h2>imu 실험: 붉은 노면과 블록의 진동 (2초 창 중앙값)</h2><div class="scroll"><table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>run</th>
+      <th>surface</th>
+      <th>rms_mps2</th>
+      <th>vertical_rms_mps2</th>
+      <th>horizontal_rms_mps2</th>
+      <th>p95_mps2</th>
+      <th>crest_factor</th>
+      <th>centroid_hz</th>
+      <th>vertical_centroid_hz</th>
+      <th>dominant_hz</th>
+      <th>fraction_3_8hz</th>
+      <th>fraction_8_15hz</th>
+      <th>fraction_15_25hz</th>
+      <th>jerk_rms_mps3</th>
+      <th>gyro_rms_rad_s</th>
+      <th>spectral_entropy_0_1</th>
+      <th>windows</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>block</td>
+      <td>3.999</td>
+      <td>2.155</td>
+      <td>3.319</td>
+      <td>7.056</td>
+      <td>3.058</td>
+      <td>25.761</td>
+      <td>28.906</td>
+      <td>32.746</td>
+      <td>0.030</td>
+      <td>0.096</td>
+      <td>0.249</td>
+      <td>345.076</td>
+      <td>0.180</td>
+      <td>0.895</td>
+      <td>16</td>
+    </tr>
+    <tr>
+      <td>1</td>
+      <td>red</td>
+      <td>5.140</td>
+      <td>3.330</td>
+      <td>3.909</td>
+      <td>8.767</td>
+      <td>2.461</td>
+      <td>23.821</td>
+      <td>26.350</td>
+      <td>23.116</td>
+      <td>0.016</td>
+      <td>0.116</td>
+      <td>0.337</td>
+      <td>457.602</td>
+      <td>0.233</td>
+      <td>0.892</td>
+      <td>19</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>block</td>
+      <td>3.494</td>
+      <td>2.046</td>
+      <td>2.823</td>
+      <td>6.424</td>
+      <td>3.150</td>
+      <td>23.701</td>
+      <td>25.540</td>
+      <td>30.151</td>
+      <td>0.038</td>
+      <td>0.142</td>
+      <td>0.308</td>
+      <td>303.642</td>
+      <td>0.156</td>
+      <td>0.911</td>
+      <td>18</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>red</td>
+      <td>4.709</td>
+      <td>2.842</td>
+      <td>3.753</td>
+      <td>8.008</td>
+      <td>2.567</td>
+      <td>25.024</td>
+      <td>26.852</td>
+      <td>28.141</td>
+      <td>0.018</td>
+      <td>0.091</td>
+      <td>0.304</td>
+      <td>417.226</td>
+      <td>0.176</td>
+      <td>0.888</td>
+      <td>16</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>block</td>
+      <td>4.269</td>
+      <td>2.191</td>
+      <td>3.587</td>
+      <td>8.492</td>
+      <td>3.286</td>
+      <td>19.890</td>
+      <td>21.714</td>
+      <td>16.583</td>
+      <td>0.063</td>
+      <td>0.249</td>
+      <td>0.339</td>
+      <td>360.004</td>
+      <td>0.176</td>
+      <td>0.926</td>
+      <td>15</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>red</td>
+      <td>7.760</td>
+      <td>4.846</td>
+      <td>6.090</td>
+      <td>13.518</td>
+      <td>2.630</td>
+      <td>19.639</td>
+      <td>21.402</td>
+      <td>18.593</td>
+      <td>0.062</td>
+      <td>0.229</td>
+      <td>0.404</td>
+      <td>651.631</td>
+      <td>0.307</td>
+      <td>0.908</td>
+      <td>19</td>
+    </tr>
+  </tbody>
+</table></div><p>현장 표시(marks.csv) 사이 구간에서 앞뒤 1초를 뺐습니다. 재질 이름이 표시된 유일한 주행 기록이라 특징 비교의 기준으로 씁니다.</p><img loading="lazy" src="plots/imu_run_1_20261127T095739_213940Z.png"><img loading="lazy" src="plots/imu_run_2_20261127T100216_182437Z.png"><img loading="lazy" src="plots/imu_run_3_20261127T100952_195894Z.png"><img src="plots/coast_comparison.png"><p>점은 개별 시험, 검은 선은 중앙값. 주황: 탐색 검사 통과, 파랑: 확인 필요.</p><img src="plots/coast_spectra.png"><p>주파수 비교 그림은 내부 분석 길이 2초 이상인 시험만 포함하며 모든 선은 0.5Hz 간격입니다. 짧은 시험의 원시 스펙트럼은 CSV에 별도 보존했습니다.</p><h2>해석과 사용 방법</h2><ul>
+<li>사용자 확인: 관성 시험은 동일한 초기 속도·하중으로 밀고 손을 놓음. 실제 속도 수치·질량·노면 경사·타이어 조건은 파일에 없어 기록된 통제 조건으로만 취급.</li>
+<li>관성 8종은 coast/block~block5, red_good, red_worst. 사진 폴더 block~block7과 장소 대응이 확인되지 않아 합치지 않음. 이름 good/worst는 제공된 식별자이며 분석 판정이 아님.</li>
+<li>지속 시간은 동일 출발 속도·경사·방향·타이어·무제동 조건에서 비교 가능. 오래 굴렀다고 마찰력이 작다고 확정할 수 없음. 노면 진동과 굴림 저항은 별도 속성.</li>
+<li>원시 가속도 m/s², 각속도 rad/s. 설정 100Hz 샘플 순서로 DSP, 호스트 시각으로 프레임·GPS·표시 연결. 기기 하드웨어 타임스탬프는 없으며 42Hz는 설정값. 앨리어싱 부재를 보증하지 않음.</li>
+<li>각 축 4차 Butterworth 1–40Hz, 오프라인 전후방 필터. 관성 시험은 시작/끝 0.25초 제외. 중력 DC/느린 성분을 억제한 진동이지, 완전한 자세 보정 선형 가속도가 아님. 감속 계산에는 대역통과 신호를 쓰지 않음.</li>
+<li>FFT 기반 Welch PSD: 2초 Hann, 50% 중첩. STFT: 2초 창,0.5초 간격. 대역 1–3/3–8/8–15/15–25/25–40Hz, 분포/자기상관/축간 coherence 추출. 주파수는 속도와 장착·바퀴 공진의 영향을 받음. db4 4단계 웨이블릿 계수 에너지 비율도 추가(periodization, 경계 영향 있음).</li>
+<li>정지 기준 검사: stop+0.5~2.5초, 다음 release와 겹침 검사, 가속도 벡터 표준편차0.15m/s²·각속도 RMS0.05rad/s 초과를 탐색용으로 표시. 다음 밀기 시작은 release보다 빠를 수 있어 통과해도 정지를 보증하지 않음.</li>
+<li>기존 감속도는 raw X축 정지 평균−주행 평균. 음수·자세 변화·회전·정지 불안정은 플래그로 보존. 임의로 절댓값을 취하거나 음수를 삭제해 좋은 노면 순위를 만들지 않음.</li>
+<li>질량·검증된 감속·경사가 없어 마찰력(N), 굴림 저항계수, 초기속도·굴림거리는 빈 값. IMU 적분으로 이를 확정하지 않음. ISO 승차감/VDV 또는 안전 인증 수치가 아님.</li>
+<li>카메라는 동일 세션·2초 창으로 조인하고 GPS는 창 중심 ±1.5초 최근값만 사용. 바퀴 접촉 시차는 미보정. 정지/이동 표시가 없으므로 폴더 전체 RMS 평균을 노면 순위로 사용하지 않음.</li>
+<li>현재 우선 사용: RMS·피크·주파수 대역 비율을 관측 속성으로 저장. 시험별 반복 분산을 보고, 경사·위치 대응 확인 후 길별 비용 정책을 별도 검증. 특징 수가 많다는 것이 재질 판별력이 검증됐다는 뜻은 아님.</li></ul>
+<p>참조: <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC7302523/">표준 속도 구간·양방향 coast-down 연구</a>, <a href="https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.welch.html">Welch PSD</a>, <a href="https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.coherence.html">Coherence</a></p><h2>분석 파일</h2><ul><li><a href="imu_segments_features.csv">imu 실험 노면 구간별 특징</a></li><li><a href="imu_windows_2s_features.csv">imu 실험 2초 창 특징</a></li><li><a href="imu_surface_summary.csv">imu 실험 회차·노면별 중앙값</a></li><li><a href="coast_trials_features.csv">관성 시험별 전체 특징·감속 검사(제외 표시 포함)</a></li><li><a href="coast_surface_summary.csv">8종 관성 요약</a></li><li><a href="frames_2s_features.csv">시각·GPS·IMU 결합 2초 특징</a></li><li><a href="observations_features.geojson">지도에 올릴 관측 점과 진동 특징(길 연결·비용 미확정)</a></li><li><a href="frames_surface_summary.csv">시각 기록 폴더별 특징 분포</a></li><li><a href="coast_psd.csv">관성 시험별 주파수 스펙트럼</a></li><li><a href="coast_peak_candidates.csv">충격 후보 시각(기준별 중복)</a></li><li><a href="recording_quality.csv">수집 품질</a></li><li><a href="feature_dictionary.json">특징 정의</a></li></ul><h2>관성 시험의 시간·주파수 변화</h2><details><summary>coast_block1_20261127T103416_245006Z</summary><img loading="lazy" src="plots/coast_block1_20261127T103416_245006Z.png"></details><details><summary>coast_block1_20261127T103507_075734Z</summary><img loading="lazy" src="plots/coast_block1_20261127T103507_075734Z.png"></details><details><summary>coast_block1_20261127T103644_459832Z</summary><img loading="lazy" src="plots/coast_block1_20261127T103644_459832Z.png"></details><details><summary>coast_block2_20261127T104201_098762Z</summary><img loading="lazy" src="plots/coast_block2_20261127T104201_098762Z.png"></details><details><summary>coast_block3_20261127T104557_947523Z</summary><img loading="lazy" src="plots/coast_block3_20261127T104557_947523Z.png"></details><details><summary>coast_block4_20261127T105047_834107Z</summary><img loading="lazy" src="plots/coast_block4_20261127T105047_834107Z.png"></details><details><summary>coast_block4_20261127T105234_802138Z</summary><img loading="lazy" src="plots/coast_block4_20261127T105234_802138Z.png"></details><details><summary>coast_block5_20261127T105526_218924Z</summary><img loading="lazy" src="plots/coast_block5_20261127T105526_218924Z.png"></details><details><summary>coast_block_20261127T102817_095527Z</summary><img loading="lazy" src="plots/coast_block_20261127T102817_095527Z.png"></details><details><summary>coast_red_good_20261127T105332_100267Z</summary><img loading="lazy" src="plots/coast_red_good_20261127T105332_100267Z.png"></details><details><summary>coast_red_worst_20261127T103730_107950Z</summary><img loading="lazy" src="plots/coast_red_worst_20261127T103730_107950Z.png"></details><details><summary>coast_red_worst_20261127T103755_362864Z</summary><img loading="lazy" src="plots/coast_red_worst_20261127T103755_362864Z.png"></details><h2>사진 기록 식별용 표본</h2><p>동일 이름의 coast 자료와 같은 장소라는 뜻은 아닙니다.</p><details><summary>block</summary><img loading="lazy" src="plots/frames_block.jpg"></details><details><summary>block1</summary><img loading="lazy" src="plots/frames_block1.jpg"></details><details><summary>block2</summary><img loading="lazy" src="plots/frames_block2.jpg"></details><details><summary>block3</summary><img loading="lazy" src="plots/frames_block3.jpg"></details><details><summary>block4</summary><img loading="lazy" src="plots/frames_block4.jpg"></details><details><summary>block5</summary><img loading="lazy" src="plots/frames_block5.jpg"></details><details><summary>block6</summary><img loading="lazy" src="plots/frames_block6.jpg"></details><details><summary>block7</summary><img loading="lazy" src="plots/frames_block7.jpg"></details><details><summary>ramp_block</summary><img loading="lazy" src="plots/frames_ramp_block.jpg"></details><details><summary>ramp_block1</summary><img loading="lazy" src="plots/frames_ramp_block1.jpg"></details><details><summary>ramp_block2</summary><img loading="lazy" src="plots/frames_ramp_block2.jpg"></details><details><summary>ramp_block3</summary><img loading="lazy" src="plots/frames_ramp_block3.jpg"></details><details><summary>ramp_block4</summary><img loading="lazy" src="plots/frames_ramp_block4.jpg"></details><details><summary>ramp_block5</summary><img loading="lazy" src="plots/frames_ramp_block5.jpg"></details><details><summary>ramp_block6</summary><img loading="lazy" src="plots/frames_ramp_block6.jpg"></details><details><summary>red_block</summary><img loading="lazy" src="plots/frames_red_block.jpg"></details><details><summary>red_block1</summary><img loading="lazy" src="plots/frames_red_block1.jpg"></details><details><summary>red_block2</summary><img loading="lazy" src="plots/frames_red_block2.jpg"></details><details><summary>red_block3</summary><img loading="lazy" src="plots/frames_red_block3.jpg"></details><details><summary>red_block4</summary><img loading="lazy" src="plots/frames_red_block4.jpg"></details></html>

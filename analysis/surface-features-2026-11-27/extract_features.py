@@ -334,7 +334,10 @@ ws.to_csv(OUT/'frames_2s_features.csv',index=False,encoding='utf-8-sig')
 geo=[]
 for row in json.loads(ws.to_json(orient='records')):
     if row.get('latitude') is None or row.get('longitude') is None:continue
-    properties={k:row.get(k) for k in ['session','surface_id','window_start_s','utc','accuracy_m','gps_time_offset_s','rms_mps2','peak_mps2','centroid_hz','dominant_hz','fraction_1_3hz','fraction_3_8hz','fraction_8_15hz','fraction_15_25hz','fraction_25_40hz','predicted_material','material_confidence','model_version','policy_version','motion_status','wheel_contact_alignment']}
+    properties={k:row.get(k) for k in ['session','surface_id','window_start_s','utc','accuracy_m','gps_time_offset_s','rms_mps2','peak_mps2','centroid_hz','dominant_hz','fraction_1_3hz','fraction_3_8hz','fraction_8_15hz','fraction_15_25hz','fraction_25_40hz','predicted_material','material_confidence','model_version','policy_version','motion_status','wheel_contact_alignment',
+                                  # 편한 길 안내에 쓰는 값: 속도, 끊김, 장착 방향과 무관한 수직 진동, 충격형 정도, 고주파, 큰 충격 수
+                                  'gps_speed_mps','ble_max_gap_s','ble_gap_flag','vertical_rms_mps2','z_excess_kurtosis','power_25_40hz_mps4',
+                                  'peak_candidates_gt10','dominant_cycles_per_m']}
     properties['feature_id']=hashlib.sha256(f"{row['session']}:{row['window_start_s']}".encode()).hexdigest()[:20]
     properties['source']='field_imu_derived_offline_v1';properties['road_cost']=None
     geo.append({'type':'Feature','geometry':{'type':'Point','coordinates':[row['longitude'],row['latitude']]},'properties':properties})
