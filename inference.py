@@ -25,6 +25,9 @@ CONFIG = {
     "model_dir": os.environ.get("MODEL_DIR", str(surface_model.MODEL_DIR)),
     "torch_device": os.environ.get("TORCH_DEVICE", "cpu"),
     "torch_threads": int(os.environ.get("TORCH_THREADS", "2")),
+    # Surface region policy: None keeps model-spec.json ("sidewalk" when absent).
+    # "wheel_ahead" judges only the lower-center region and skips the Area model.
+    "surface_region": os.environ.get("SURFACE_REGION") or None,
     # onnxruntime backend
     "onnx_providers": None,                         # None -> ["CPUExecutionProvider"]
     # qnn backend (Rubik Pi); set once models are compiled to .dlc/.bin
@@ -40,6 +43,9 @@ def load_models() -> dict:
     """Build the Area+Material pipeline for the configured backend."""
     backend = CONFIG["backend"]
     model_dir = Path(CONFIG["model_dir"]).expanduser().resolve()
+    region = CONFIG["surface_region"]
+    if region and region not in surface_model.REGIONS:
+        raise ValueError(f"Unknown SURFACE_REGION {region!r}; expected one of {surface_model.REGIONS}")
 
     if backend == "torch":
         model = surface_model.SurfaceModel.from_checkpoints(
@@ -60,6 +66,8 @@ def load_models() -> dict:
     else:
         raise ValueError(f"Unknown inference backend: {backend!r}")
 
+    if region:
+        model.spec["policy"]["region"] = region
     return {"surface": model}
 
 

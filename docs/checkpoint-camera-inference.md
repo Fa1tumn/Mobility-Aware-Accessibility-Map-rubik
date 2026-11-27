@@ -43,6 +43,25 @@ remains available:
 INFERENCE_BACKEND=onnxruntime .venv/bin/python main.py
 ```
 
+### Wheel-ahead region (optional)
+
+`SURFACE_REGION=wheel_ahead` judges the material only in the region the wheels
+are about to roll over: the bottom half of the frame x the middle half of its
+width, the same region used for sharpness. The Area model is not run, so
+`area_accept_ratio` is stored as null, `material_accept_ratio` is the confident
+share of that region, and `policy_version` becomes
+`wheel_ahead(lower_half,center_half)&material>=0.8`. Unset (default) keeps the
+whole-frame sidewalk rule.
+
+```bash
+SURFACE_REGION=wheel_ahead INFERENCE_BACKEND=onnxruntime MODEL_DIR="$PWD/models/finetuned-v3-onnx" .venv/bin/python main.py
+```
+
+On the 11/25 drive (2-second records, one fixed frame each), the 2nd-round
+material model scored 340/343 blocks and 18/69 non-block records with this
+region, against 323/343 and 10/69 with the whole-frame sidewalk rule. On a PC
+CPU the per-frame time fell from 132 ms to 70 ms; Pi timing is not yet measured.
+
 Weights use PyTorch's restricted `weights_only=True` loader, with additional
 array types allowlisted for the NumPy RNG state stored in the checkpoints.
 The loader also maps the checkpoints' NumPy 2 `numpy._core` reconstruction
