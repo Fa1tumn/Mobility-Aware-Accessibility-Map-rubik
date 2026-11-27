@@ -5,6 +5,23 @@
 보조로 붉은 노면과 블록을 가르는 특징 후보(imu 실험)와 frames 라벨별 블록 길 특성을 정리했다.
 원본 기록(recordings: frames, frames_v3_2s_wheel_ahead, imu, coast)은 용량이 커서 넣지 않았다.
 
+## material 번호
+
+coast 8종 노면은 material 1~8로 부르고, `material_code = <번호>_<합계 순위>`로 적는다. 표와 파일은 material 번호 순이다.
+
+| material | 노면 | material_code | 떨림 순위 | 굴림 순위 | 합계 순위 |
+|---|---|---|---|---|---|
+| 1 | block | 1_1 | 1 | 8 | 1 |
+| 2 | block1 | 2_3 | 2 | 4 | 3 |
+| 3 | red_worst | 3_8 | 8 | 7 | 8 |
+| 4 | block2 | 4_4 | 5 | 2 | 4 |
+| 5 | block3 | 5_2 | 3 | 3 | 2 |
+| 6 | block4 | 6_6 | 6 | 1 | 6 |
+| 7 | red_good | 7_5 | 4 | 6 | 5 |
+| 8 | block5 | 8_7 | 7 | 5 | 7 |
+
+합계 = 0.5 × 떨림 비용(수직 진동 RMS / 8종 중앙값) + 0.5 × 굴림 비용((1/주행 시간) / 8종 중앙값). 낮을수록 1위이고, 무게는 정하지 않은 값이다.
+
 ## 올린 파일 정리
 
 | 구분 | 파일 | 내용 |
@@ -13,8 +30,9 @@
 | | `index.html` | 전체 분석 보고서 (coast 관성 시험, imu 실험, 사진 표본). 브라우저로 연다 |
 | | `feature_candidates.md` | 붉은 노면과 블록을 가르는 특징 후보 (imu 실험 기준) |
 | | `README.md` | 이 폴더 설명 |
-| **coast 8종** | `coast_profiles.csv` | 노면 8종별 주행·회차 수, 주행 시간(중앙값·사분위·최소·최대), 감속도 기존·보정(중앙값·사분위·음수 수), 손 뗄 때 속도 추정, pitch 변화, 수직 진동, 첨도, 주 진동수, 대역 비율, 품질 표시 수, 비용과 순위 |
+| **coast 8종** | `coast_profiles.csv` | material 번호 순. `material_id`, `material_code`와 노면 8종별 주행·회차 수, 주행 시간(중앙값·사분위·최소·최대), 감속도 기존·보정(중앙값·사분위·음수 수), 손 뗄 때 속도 추정, pitch 변화, 수직 진동, 첨도, 주 진동수, 대역 비율, 품질 표시 수, 비용과 순위 |
 | | `coast_profiles.json` | 같은 내용과 기준값, 무게, 제외한 주행 4회, 감속도 검증 결과 |
+| | `coast_trials_by_material.csv` | 측정 오류를 뺀 주행 42회를 material 번호·회차·trial 순으로 정렬. `material_id`, `material_code`를 앞에 붙임 |
 | | `coast_trials_features.csv` | 주행 46회의 특징과 품질 표시. 측정 오류 4회는 `excluded_measurement_error`로 표시(행은 남김). pitch 보정 감속도와 손 뗄 때 속도 추정 포함 |
 | | `coast_surface_summary.csv` | 측정 오류를 뺀 42회의 노면 8종 요약(주행 시간, 진동 RMS, 중심 주파수, 감속도 대리값) |
 | | `coast_psd.csv` | 측정 오류를 뺀 42회의 주행별 주파수 스펙트럼 |

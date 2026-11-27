@@ -16,7 +16,12 @@
     굴림 비용   (1 / 주행 시간) / 8종 중앙값. 같은 초기 속도라면 평균 감속도에 비례한다
     합계        0.5 × 떨림 + 0.5 × 굴림. 무게는 정하지 않은 값이다
 
-결과: coast_profiles.csv, coast_profiles.json, coast_profiles.md, plots/coast_profiles.png
+material 번호: 노면 8종을 1~8로 부른다(팀 지정 순서).
+    block=1, block1=2, red_worst=3, block2=4, block3=5, block4=6, red_good=7, block5=8
+    material_code = '<번호>_<합계 순위>'. 예: red_worst는 material 3, 합계 순위 8이면 3_8
+    표와 파일은 material 번호 순으로 정렬한다.
+
+결과: coast_profiles.csv, coast_profiles.json, coast_profiles.md, coast_trials_by_material.csv, plots/coast_profiles.png
 """
 from pathlib import Path
 import json
@@ -28,7 +33,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 OUT = Path(__file__).resolve().parent
-SURFACES = ['block', 'block1', 'block2', 'block3', 'block4', 'block5', 'red_good', 'red_worst']
+MATERIAL_ID = {'block': 1, 'block1': 2, 'red_worst': 3, 'block2': 4, 'block3': 5, 'block4': 6, 'red_good': 7, 'block5': 8}
+SURFACES = sorted(MATERIAL_ID, key=MATERIAL_ID.get)
 WEIGHTS = {'vibration': .5, 'rolling': .5}
 BANDS = ['1_3', '3_8', '8_15', '15_25', '25_40']
 
@@ -88,7 +94,15 @@ def main():
     prof['total_cost'] = WEIGHTS['vibration'] * prof.vibration_cost + WEIGHTS['rolling'] * prof.rolling_cost
     for col in ('vibration_cost', 'rolling_cost', 'total_cost'):
         prof[col.replace('_cost', '_rank')] = prof[col].rank(method='min').astype(int)
-    prof = prof.sort_values('total_cost').reset_index(drop=True)
+    prof.insert(0, 'material_id', prof.surface.map(MATERIAL_ID))
+    prof.insert(1, 'material_code', prof.material_id.astype(str) + '_' + prof.total_rank.astype(str))
+    prof = prof.sort_values('material_id').reset_index(drop=True)
+    # 주행별 표에도 같은 번호를 붙여 material 순으로 정렬해 둔다
+    code = prof.set_index('surface').material_code
+    trials = c.assign(material_id=c.surface_id.map(MATERIAL_ID), material_code=c.surface_id.map(code))
+    front = ['material_id', 'material_code', 'surface_id', 'session', 'trial']
+    trials = trials[front + [x for x in trials.columns if x not in front]].sort_values(['material_id', 'session', 'trial'])
+    trials.to_csv(OUT / 'coast_trials_by_material.csv', index=False, encoding='utf-8-sig')
 
     # 감속도 검증: 같은 속도로 밀었다면 감속도는 1/주행 시간에 비례해야 한다
     check = {}
@@ -99,7 +113,9 @@ def main():
                       'spearman_with_inverse_coast': float(stats.spearmanr(ok[col], 1 / ok.coast_duration_s).statistic),
                       'initial_speed_median_mps': float(v0.median()),
                       'initial_speed_q25_mps': float(v0.quantile(.25)), 'initial_speed_q75_mps': float(v0.quantile(.75))}
-    meta = {'surfaces': SURFACES, 'weights': WEIGHTS, 'vibration_reference_mps2': float(vib_ref),
+    meta = {'surfaces': SURFACES, 'material_id': MATERIAL_ID,
+            'material_code_rule': '<material 번호>_<합계 순위>. 합계 = 0.5 × 떨림 비용 + 0.5 × 굴림 비용, 낮을수록 1위',
+            'weights': WEIGHTS, 'vibration_reference_mps2': float(vib_ref),
             'rolling_reference_per_s': float(roll_ref), 'trials_used': len(c),
             'excluded': [{'session': r.session, 'trial': int(r.trial), 'coast_s': float(r.coast_duration_s)}
                          for r in excluded.itertuples()],
@@ -109,7 +125,7 @@ def main():
                                                         ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     plot(c, prof)
     write_md(prof, meta, c)
-    print(prof[['surface', 'trials', 'coast_s_median', 'decel_existing_median_mps2', 'decel_corrected_median_mps2',
+    print(prof[['material_id', 'material_code', 'surface', 'trials', 'coast_s_median', 'decel_existing_median_mps2', 'decel_corrected_median_mps2',
                 'initial_speed_estimate_median_mps', 'vertical_rms_median_mps2', 'z_kurtosis_median', 'dominant_hz_median',
                 'vibration_rank', 'rolling_rank', 'total_rank']].round(2).to_string(index=False))
     print(json.dumps(check, indent=1))
@@ -123,7 +139,7 @@ def plot(c, prof):
         axs[0].scatter(g.coast_duration_s, g.vertical_rms_mps2, color=colors[s], s=22, alpha=.7)
         p = prof[prof.surface == s].iloc[0]
         axs[0].scatter(p.coast_s_median, p.vertical_rms_median_mps2, color=colors[s], s=90, edgecolor='black')
-        axs[0].annotate(s, (p.coast_s_median, p.vertical_rms_median_mps2), xytext=(5, 5), textcoords='offset points', fontsize=9)
+        axs[0].annotate(f'{p.material_code} {s}', (p.coast_s_median, p.vertical_rms_median_mps2), xytext=(5, 5), textcoords='offset points', fontsize=9)
     axs[0].set(xlabel='Coast time (s): longer = rolls more easily', ylabel='Vertical vibration RMS (m/s²)',
                title='Rolling vs vibration (small = trial, large = median)')
     for i, s in enumerate(prof.surface):
@@ -132,7 +148,7 @@ def plot(c, prof):
             axs[1].scatter(np.full(len(g), i + (j - .5) * .3), g[col], marker=mark, s=18,
                            color=['#999', '#333'][j], label=['existing', 'pitch corrected'][j] if i == 0 else None)
     axs[1].axhline(0, color='black', lw=.6)
-    axs[1].set_xticks(range(len(prof)), prof.surface, rotation=40, ha='right')
+    axs[1].set_xticks(range(len(prof)), [f'{m} {s}' for m, s in zip(prof.material_code, prof.surface)], rotation=40, ha='right')
     axs[1].set(ylabel='Deceleration (m/s²)', title='Deceleration per trial: existing vs pitch corrected')
     axs[1].legend(fontsize=8)
     for s in prof.surface:
@@ -154,12 +170,14 @@ def write_md(prof, meta, c):
          f"- 대상: {', '.join(meta['surfaces'])}",
          f"- 사용한 주행: {meta['trials_used']}회. 측정 오류로 뺀 주행: " +
          ', '.join(f"{e['session'].split('/')[1]} {e['session'].split('/')[2]} {e['trial']}번째({e['coast_s']:.2f}초)" for e in meta['excluded']),
-         '- 대표값은 중앙값. 비용은 8종 중앙값을 1로 둔 상대값이고 낮을수록 좋다', '',
-         '## 노면별 요약 (합계 비용 순)', '',
-         '| 노면 | 주행 | 주행 시간 s (사분위) | 감속도 기존 | 감속도 보정 | 초기 속도 추정 m/s | 수직 진동 RMS | 첨도 | 주 진동수 Hz (사분위) | 떨림 순위 | 굴림 순위 | 합계 순위 |',
-         '|---|---|---|---|---|---|---|---|---|---|---|---|']
+         '- 대표값은 중앙값. 비용은 8종 중앙값을 1로 둔 상대값이고 낮을수록 좋다',
+         '- material 번호: ' + ', '.join(f'{s}={i}' for s, i in meta['material_id'].items()) +
+         '. material_code = <번호>_<합계 순위> (예: red_worst는 3_8)', '',
+         '## material별 요약 (material 번호 순)', '',
+         '| material_code | 노면 | 주행 | 주행 시간 s (사분위) | 감속도 기존 | 감속도 보정 | 초기 속도 추정 m/s | 수직 진동 RMS | 첨도 | 주 진동수 Hz (사분위) | 떨림 순위 | 굴림 순위 | 합계 순위 |',
+         '|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     for r in prof.itertuples():
-        L.append(f"| {r.surface} | {r.trials} | {f(r.coast_s_median)} ({f(r.coast_s_q25)}–{f(r.coast_s_q75)}) |"
+        L.append(f"| {r.material_code} | {r.surface} | {r.trials} | {f(r.coast_s_median)} ({f(r.coast_s_q25)}–{f(r.coast_s_q75)}) |"
                  f" {f(r.decel_existing_median_mps2, 3)} ({r.decel_existing_nonpositive} 음수) |"
                  f" {f(r.decel_corrected_median_mps2, 3)} ({r.decel_corrected_nonpositive} 음수) | {f(r.initial_speed_estimate_median_mps)} |"
                  f" {f(r.vertical_rms_median_mps2)} | {f(r.z_kurtosis_median, 1)} | {f(r.dominant_hz_median, 1)} ({f(r.dominant_hz_q25, 1)}–{f(r.dominant_hz_q75, 1)}) |"
