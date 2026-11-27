@@ -1,5 +1,6 @@
 {
-  "sample_rate_config_hz": 100,
+  "sample_rate_config_hz": 100.0,
+  "sensor_bandwidth_hz": 42,
   "bandpass_hz": [
     1,
     40
@@ -15,6 +16,34 @@
     20
   ],
   "coast_edge_trim_seconds": 0.25,
+  "coast_rest_window_s": [
+    0.5,
+    2.5
+  ],
+  "coast_excluded_trials": [
+    [
+      "block",
+      4
+    ],
+    [
+      "block4",
+      3
+    ],
+    [
+      "block4",
+      4
+    ]
+  ],
+  "coast_excluded_rule": "폴더명+trial (회차 구분 없음)",
+  "imu_segment_trim_seconds": 1.0,
+  "ble_gap_flag_seconds": 0.1,
+  "skipped_folders": [
+    "test"
+  ],
+  "vertical_axis": "구간 평균 중력 방향",
+  "gps_speed": "창±0.5초, 정확도 10m 이하 점 2개 이상, 1.5초 이상",
+  "gps_window_join_seconds": 1.5,
+  "pitch_gravity_correction": "ax + g·sin(pitch)",
   "user_confirmed_equal_initial_speed": true,
   "initial_speed_instrumented": false,
   "user_confirmed_equal_load": true,
@@ -25,6 +54,7 @@
     "scipy": "1.18.1",
     "pandas": "3.1.1",
     "matplotlib": "3.11.2",
-    "PyWavelets": "1.10.0"
+    "PyWavelets": "1.10.0",
+    "pillow": "13.0.0"
   }
 }

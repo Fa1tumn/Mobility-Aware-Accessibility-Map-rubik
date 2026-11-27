@@ -5,74 +5,46 @@
 보조로 붉은 노면과 블록을 가르는 특징 후보(imu 실험)와 frames 라벨별 블록 길 특성을 정리했다.
 원본 기록(recordings: frames, frames_v3_2s_wheel_ahead, imu, coast)은 용량이 커서 넣지 않았다.
 
-## 먼저 볼 파일
+## 올린 파일 정리
 
-| 파일 | 내용 |
-|---|---|
-| `coast_profiles.md` | **coast 8종 노면 요약.** 주행 시간, 감속도(기존·보정), 초기 속도 추정, 수직 진동, 첨도, 주 진동수, 떨림·굴림·합계 순위, 감속도 검증 |
-| `block_comfort_map.html` | (보조) frames 라벨 블록 길 지도. 2초 창 점을 편안함 비용으로 색칠하고, 아래에 라벨별 특성 표를 둔다. 브라우저로 연다 |
-| `block_profiles.csv` | (보조) frames 라벨 20개의 진동 특성, 진동수, 편안함 순위·등급, 안내 문구 |
-| `feature_candidates.md` | 붉은 노면과 블록을 가르는 특징 후보 정리 |
-| `index.html` | 전체 분석 보고서 (coast 관성 시험, imu 실험, 사진 표본) |
-
-## 올린 파일 전체
-
-### coast 8종 노면 (`coast_profiles.py`)
-
-| 파일 | 내용 |
-|---|---|
-| `coast_profiles.md` | 노면별 요약 표와 감속도 검증, 주의 사항 |
-| `coast_profiles.csv` | 노면별 주행 수·회차 수, 주행 시간(중앙값·사분위·최소·최대), 1/주행 시간, 감속도 기존·보정(중앙값·사분위·음수 수), 초기 속도 추정, pitch 변화, 수직 진동 RMS, 첨도, 큰 충격 비율, 주 진동수, 대역 비율, 품질 표시 수, 떨림·굴림·합계 비용과 순위 |
-| `coast_profiles.json` | 같은 내용과 기준값, 무게, 제외한 주행, 감속도 검증 결과 |
-| `plots/coast_profiles.png` | 굴림(주행 시간) 대 떨림(수직 RMS), 시험별 감속도 기존·보정, 초기 속도 추정 |
-
-### (보조) frames 라벨 블록 길 특성 (`block_profiles.py`)
-
-| 파일 | 내용 |
-|---|---|
-| `block_profiles.csv` | 라벨별 창 수, 거리, 수직 진동 RMS(중앙값·사분위), 10m당 큰 충격 수, 첨도와 진동 모양, 주 진동수 사분위, 대역 비율, 1m당 반복 수, 속도별 예상 진동수 대역, 편안함 비용·순위·등급, 안내 문구, 위치 범위 |
-| `block_profiles.json` | 같은 내용과 계산 기준(기준값, 무게, 등급 경계) |
-| `block_comfort.geojson` | 이동 중이고 끊김 없는 2초 창 점 2,219개. 라벨, 속도, 수직 RMS, 충격 수, 첨도, 진동수, 편안함 비용, 라벨 등급과 안내 문구 |
-| `block_comfort_map.html` | 위 GeoJSON 지도와 라벨 표 |
-
-### 특징 후보 (`feature_candidates.py`)
-
-| 파일 | 내용 |
-|---|---|
-| `feature_candidates.md` | 후보 순위, 묶음별 대표, 회차마다 방향이 바뀌는 특징, 속도 영향, 중복 묶음 |
-| `feature_candidates.csv` | 특징별 회차 delta, 중앙값, 회차 안정성, 속도 상관, coast 비교, 중복 전체 |
-| `plots/candidates_top.png` | 상위 후보 8개의 회차별 분포 (빨강 = 붉은 노면, 파랑 = 블록) |
-
-### 특징 추출 (`extract_features.py`)
-
-| 파일 | 내용 |
-|---|---|
-| `imu_segments_features.csv` | imu 실험(회차 1·2·3) red_*·block_* 구간 12개 특징 |
-| `imu_windows_2s_features.csv` | 같은 구간의 2초 창 103개 특징 |
-| `imu_surface_summary.csv` | 회차·노면별 2초 창 중앙값 |
-| `frames_2s_features.csv` | frames 기록 2초 창 2,351개. 진동 특징 약 100개, 카메라 예측, GPS 위치·속도, 블루투스 끊김 |
-| `frames_surface_summary.csv` | frames 라벨별 특징 분포 |
-| `observations_features.geojson` | frames 2초 창 점 2,351개. 진동 요약, 카메라 예측, 속도, 끊김, 수직 RMS, 첨도, 25~40Hz 파워, 큰 충격 수 |
-| `coast_trials_features.csv` | 관성 시험 46회 특징과 품질 표시. 측정 오류 4회는 `excluded_measurement_error`로 표시. pitch 보정 감속도와 초기 속도 추정 포함 |
-| `coast_surface_summary.csv` | 측정 오류를 뺀 42회의 노면별 요약 |
-| `coast_psd.csv` | 관성 시험별 주파수 스펙트럼 (측정 오류 제외) |
-| `coast_peak_candidates.csv` | 관성 시험 중 충격 후보 시각 |
-| `recording_quality.csv` | 회차별 샘플 수, 끊김, 포화 등 수집 품질 |
-| `feature_dictionary.json` | 특징 정의 |
-| `analysis_config.json` | 필터, 창, 대역 설정과 라이브러리 버전 |
-| `validation.json` | `validate_features.py` 검사 결과 |
-| `plots/imu_run_*.png` | imu 실험 회차별 진동과 분석 구간 |
-| `plots/coast_*.png`, `plots/frames_*.jpg` | 보고서 그림 (관성 시험 시간·주파수, 사진 표본) |
-
-### 스크립트
-
-| 파일 | 내용 |
-|---|---|
-| `extract_features.py` | 원본 recordings에서 특징 CSV, GeoJSON, 보고서, 그림을 만든다 |
-| `feature_candidates.py` | imu 실험 2초 창으로 특징 후보를 고른다 |
-| `coast_profiles.py` | coast 8종 노면의 굴림·진동 특성과 감속도 검증 |
-| `block_profiles.py` | frames 2초 창으로 라벨별 블록 특성과 편안함 비용을 만든다 |
-| `validate_features.py` | 계산 검사(합성 신호, 원본 패킷 단위, 대역 합, 중복)와 원본 해시 확인 |
+| 구분 | 파일 | 내용 |
+|---|---|---|
+| **먼저 볼 것** | `coast_profiles.md` | **주 분석.** coast 8종 노면(block~block5, red_good, red_worst)의 주행 시간, 감속도(기존·pitch 보정), 수직 진동, 첨도, 주 진동수, 떨림·굴림·합계 순위, 감속도 검증 |
+| | `index.html` | 전체 분석 보고서 (coast 관성 시험, imu 실험, 사진 표본). 브라우저로 연다 |
+| | `feature_candidates.md` | 붉은 노면과 블록을 가르는 특징 후보 (imu 실험 기준) |
+| | `README.md` | 이 폴더 설명 |
+| **coast 8종** | `coast_profiles.csv` | 노면 8종별 주행·회차 수, 주행 시간(중앙값·사분위·최소·최대), 감속도 기존·보정(중앙값·사분위·음수 수), 손 뗄 때 속도 추정, pitch 변화, 수직 진동, 첨도, 주 진동수, 대역 비율, 품질 표시 수, 비용과 순위 |
+| | `coast_profiles.json` | 같은 내용과 기준값, 무게, 제외한 주행 4회, 감속도 검증 결과 |
+| | `coast_trials_features.csv` | 주행 46회의 특징과 품질 표시. 측정 오류 4회는 `excluded_measurement_error`로 표시(행은 남김). pitch 보정 감속도와 손 뗄 때 속도 추정 포함 |
+| | `coast_surface_summary.csv` | 측정 오류를 뺀 42회의 노면 8종 요약(주행 시간, 진동 RMS, 중심 주파수, 감속도 대리값) |
+| | `coast_psd.csv` | 측정 오류를 뺀 42회의 주행별 주파수 스펙트럼 |
+| | `coast_peak_candidates.csv` | 주행 중 충격 후보 시각 453건(주행 44회). 측정 오류 주행의 37건은 `excluded_measurement_error`로 표시 |
+| | `plots/coast_profiles.png` | 굴림(주행 시간) 대 떨림(수직 RMS), 주행별 감속도 기존·보정, 손 뗄 때 속도 추정 |
+| | `plots/coast_comparison.png`, `plots/coast_spectra.png` | 노면별 주행 시간·진동·감속도 비교, 노면별 스펙트럼 |
+| | `plots/coast_<노면>_<회차>.png` | 회차별 진동과 주행 구간, 시간-주파수 그림 12개 |
+| **imu 실험** | `imu_segments_features.csv` | 회차 1·2·3의 red_*·block_* 구간 12개 특징 |
+| | `imu_windows_2s_features.csv` | 같은 구간의 2초 창 103개 특징 |
+| | `imu_surface_summary.csv` | 회차·노면별 2초 창 중앙값 (6행) |
+| | `plots/imu_run_*.png` | 회차별 진동과 분석 구간 3개 |
+| **특징 후보** | `feature_candidates.csv` | 특징 69개의 회차별 delta, 중앙값, 회차 안정성, 속도 상관, coast 비교, 중복 |
+| | `plots/candidates_top.png` | 상위 후보 8개의 회차별 분포 |
+| **frames (보조)** | `frames_2s_features.csv` | 2초 창 2,351개의 진동 특징, 카메라 예측, GPS 위치·속도, 블루투스 끊김 |
+| | `frames_surface_summary.csv` | frames 라벨 20개의 주요 특징 중앙값·사분위 |
+| | `observations_features.geojson` | 2초 창 점 2,351개. 진동 요약, 카메라 예측, 속도, 끊김, 수직 RMS, 첨도, 25~40Hz 파워, 큰 충격 수 |
+| | `plots/frames_<라벨>.jpg` | 라벨별 사진 표본 20개 |
+| **블록 길 (보조)** | `block_comfort_map.html` | frames 라벨 블록 길 지도(2초 창 점을 편안함 비용으로 색칠)와 라벨 표 |
+| | `block_profiles.csv` | frames 라벨 20개의 진동 특성, 진동수, 편안함 순위·등급, 안내 문구 |
+| | `block_profiles.json` | 같은 내용과 계산 기준(기준값, 무게, 등급 경계) |
+| | `block_comfort.geojson` | 이동 중이고 끊김 없는 2초 창 점 2,219개와 편안함 비용 |
+| **품질·설정** | `recording_quality.csv` | 회차 36개(frames 20, coast 13, imu 3)의 샘플 수, 끊김, 포화 등 수집 품질 |
+| | `feature_dictionary.json` | 특징 정의 35개 |
+| | `analysis_config.json` | 필터, 창, 대역, 제외 규칙, 끊김 기준, 라이브러리 버전 (코드에서 생성) |
+| | `validation.json` | `validate_features.py` 검사 결과 |
+| **스크립트** | `extract_features.py` | 원본 recordings에서 특징 CSV, GeoJSON, 보고서, 그림, 설정 파일을 만든다 |
+| | `coast_profiles.py` | coast 8종 노면의 굴림·진동 특성과 감속도 검증 |
+| | `feature_candidates.py` | imu 실험 2초 창으로 특징 후보를 고른다 |
+| | `block_profiles.py` | frames 라벨별 블록 특성과 편안함 비용 |
+| | `validate_features.py` | 계산 검사(합성 신호, 원본 패킷 단위, 대역 합, 중복)와 원본 해시 확인 |
 
 ## 분석 기준
 
@@ -107,6 +79,7 @@
 ```bash
 pip install numpy pandas scipy PyWavelets matplotlib pillow
 SURFACE_RECORDINGS=/path/to/recordings python extract_features.py
+python coast_profiles.py
 python feature_candidates.py
 python block_profiles.py
 python validate_features.py   # extract_features.py 결과 검사 (원본 경로가 같아야 함)

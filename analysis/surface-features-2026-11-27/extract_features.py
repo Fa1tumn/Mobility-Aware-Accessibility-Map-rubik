@@ -224,7 +224,8 @@ for folder in sorted((ROOT/'coast').glob('*/*')):
         TRIALS.append(r)
         for thr,ii in peaks.items():
             for k in ii[(t[ii]>=release)&(t[ii]<stop)]:
-                PEAKS.append({'session':sid,'surface_id':name,'trial':int(row.trial),'t_s':float(t[k]),'utc':stamp(meta,t[k]),'threshold_mps2':thr,'peak_mps2':float(np.linalg.norm(bp[k])),'boundary_within_025s':bool(t[k]<lo or t[k]>=hi)})
+                PEAKS.append({'session':sid,'surface_id':name,'trial':int(row.trial),'t_s':float(t[k]),'utc':stamp(meta,t[k]),'threshold_mps2':thr,'peak_mps2':float(np.linalg.norm(bp[k])),'boundary_within_025s':bool(t[k]<lo or t[k]>=hi),
+                              'excluded_measurement_error':r['excluded_measurement_error']})
     # Show the original signal plus frequency evolution and trial markers.
     fig,axs=plt.subplots(2,1,figsize=(11,6),constrained_layout=True)
     axs[0].plot(t,np.linalg.norm(bp,axis=1),lw=.5)
@@ -420,6 +421,17 @@ definitions={
  'excluded_measurement_error':'데이터 안내서의 측정 오류 시험(coast block 4번째, block4 3·4번째). 행은 남기고 요약·그림에서 제외',
 }
 (OUT/'feature_dictionary.json').write_text(json.dumps(definitions,ensure_ascii=False,indent=2))
+import importlib.metadata as _md
+config={'sample_rate_config_hz':FS,'sensor_bandwidth_hz':42,'bandpass_hz':[1,40],'filter':'Butterworth order4 sosfiltfilt offline',
+        'welch_seconds':2,'welch_overlap':.5,'stft_hop_seconds':.5,'wavelet':'db4 level4 periodization','shock_thresholds_mps2':[5,10,20],
+        'coast_edge_trim_seconds':.25,'coast_rest_window_s':[.5,2.5],'coast_excluded_trials':sorted([list(x[:2]) for x in EXCLUDED_COAST]),
+        'coast_excluded_rule':'폴더명+trial (회차 구분 없음)','imu_segment_trim_seconds':IMU_SEGMENT_TRIM_S,'ble_gap_flag_seconds':BLE_GAP_FLAG_S,
+        'skipped_folders':sorted(SKIP_FOLDERS),'vertical_axis':'구간 평균 중력 방향','gps_speed':'창±0.5초, 정확도 10m 이하 점 2개 이상, 1.5초 이상',
+        'gps_window_join_seconds':1.5,'pitch_gravity_correction':'ax + g·sin(pitch)',
+        'user_confirmed_equal_initial_speed':True,'initial_speed_instrumented':False,'user_confirmed_equal_load':True,'mass_kg':None,
+        'coast_to_frames_location_mapping_verified':False,
+        'libraries':{n:_md.version(n) for n in ['numpy','scipy','pandas','matplotlib','PyWavelets','pillow']}}
+(OUT/'analysis_config.json').write_text(json.dumps(config,ensure_ascii=False,indent=2))
 method='''<h2>해석과 사용 방법</h2><ul>
 <li>사용자 확인: 관성 시험은 동일한 초기 속도·하중으로 밀고 손을 놓음. 실제 속도 수치·질량·노면 경사·타이어 조건은 파일에 없어 기록된 통제 조건으로만 취급.</li>
 <li>관성 8종은 coast/block~block5, red_good, red_worst. 사진 폴더 block~block7과 장소 대응이 확인되지 않아 합치지 않음. 이름 good/worst는 제공된 식별자이며 분석 판정이 아님.</li>
