@@ -121,6 +121,52 @@ class ReplayBenchmarkTest(unittest.TestCase):
         self.assertGreater(summary["frames"]["dropped_unread"], 0)
         self.assertFalse(summary["fits_interval"])
 
+    def test_live_load_runs_devices_and_reports(self):
+        import queue
+        import sys
+        import threading
+        import types
+        closed = []
+
+        def open_camera(_config):
+            cam = {"frames": queue.Queue(maxsize=1), "error": None}
+
+            def feed():
+                while "camera" not in closed:
+                    try:
+                        cam["frames"].put({"image": None}, timeout=0.1)
+                    except queue.Full:
+                        pass
+                    time.sleep(1 / 30)
+            threading.Thread(target=feed, daemon=True).start()
+            return cam
+        fake_imu = types.SimpleNamespace(start_imu=lambda: {"last_sample_time_s": 1.0},
+                                         stop_imu=lambda s: closed.append("imu"))
+        fake_phone = types.SimpleNamespace(start_phone=lambda: (_ for _ in ()).throw(OSError("포트 사용 중")),
+                                           stop_phone=lambda s: closed.append("gps"))
+        originals = (bench.vision.open_camera, bench.vision.close_camera, bench.vision.load_camera_config)
+        bench.vision.open_camera = open_camera
+        bench.vision.close_camera = lambda c: closed.append("camera")
+        bench.vision.load_camera_config = lambda: {}
+        sys.modules["imu"], sys.modules["phone"] = fake_imu, fake_phone
+        try:
+            load = bench.LiveLoad()
+            load.start()
+            windows, _, _, summary = bench.measure(
+                self.recording, self.rows, self.models, self.meter, self.sampler, policy="timed", interval_s=1.0,
+                start_s=0.0, duration_s=2.0, source_fps=None, warmup=1, gyro_rms=None, live_load=load)
+            load.stop()
+        finally:
+            bench.vision.open_camera, bench.vision.close_camera, bench.vision.load_camera_config = originals
+            sys.modules.pop("imu"), sys.modules.pop("phone")
+        ll = summary["live_load"]
+        self.assertGreater(ll["camera_fps"], 10)            # 가짜 카메라 30fps를 실제로 비웠다
+        self.assertTrue(ll["imu_receiving"])
+        self.assertFalse(ll["gps_receiving"])
+        self.assertIn("gps", ll["errors"])                   # 켜지 못한 장비는 오류로 남고 측정은 계속
+        self.assertEqual(sorted(closed), ["camera", "imu"])
+        self.assertEqual([w["inferred"] for w in windows], [1, 1])
+
     def test_markdown_and_pc_comparison(self):
         _, _, _, summary = self.run_policy("timed")
         results = {"runs": [{"method": "A", "interval_s": 1.0, "windows": [

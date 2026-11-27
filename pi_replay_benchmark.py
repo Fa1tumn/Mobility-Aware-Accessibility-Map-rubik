@@ -12,13 +12,17 @@
     CPU·메모리·온도               1초마다 이 프로세스 CPU, 시스템 CPU, RSS, 최고 온도, 최저 CPU 클럭
     결과 지연                     구간이 끝난 뒤 결과가 나오기까지 걸린 시간
 
+장비 부하 (--live-load)
+    실제 카메라, IMU(BLE), GPS 수신을 켜 둔 채로 같은 replay를 돌린다. 장비 데이터는 분석에 쓰지 않고
+    부하만 준다. 끈 측정과 비교하면 장비 부하가 분석 시간을 얼마나 늘리는지 나온다.
+
 분석 방식 (--policy)
     live     main.py와 같은 camera_inference.iter_windows. 3장마다 가장 선명한 사진을 분석
     timed    구간마다 한 장, 구간의 마지막 사진 (compare_replay 방법 A/B)
     quality  구간마다 한 장, 밝기 검사 + 선명도·자이로 순위로 고른 사진 (compare_replay 방법 C/D)
 
-한계: 실제 수집에서 함께 도는 카메라 인코딩, BLE(IMU), GPS 수신, 업로드 부하는 빠진다.
-짧은 실제 수집(main.py)의 timing_ms와 비교해 차이를 확인한다.
+한계: Supabase 업로드는 어느 쪽에도 들어가지 않는다. --live-load 없이 재면 카메라 인코딩,
+BLE(IMU), GPS 수신 부하도 빠진다.
 """
 import argparse
 import csv
@@ -40,6 +44,7 @@ import numpy as np
 
 import camera_inference
 import inference
+import vision
 
 POLICIES = ("live", "timed", "quality")
 STAGES = ("preprocess", "area", "material", "postprocess", "total")
@@ -252,6 +257,76 @@ class SystemSampler:
             self._thread.join(timeout=5)
 
 
+# ---------------------------------------------------------------- 장비 부하
+
+class LiveLoad:
+    """main.py와 같은 방법으로 카메라·IMU·GPS를 켜 두기만 한다. 받은 데이터는 버린다.
+
+    카메라는 GStreamer가 초당 30장을 인코딩하고 리더 스레드가 디코딩한다. 받은 사진 수를 세어
+    카메라가 실제로 돌고 있었는지 확인한다. 켜지 못한 장비는 errors에 남기고 나머지만 켠다.
+    """
+
+    def __init__(self, devices=("camera", "imu", "gps")):
+        self.devices = devices
+        self.camera = self.imu_state = self.phone_state = None
+        self.errors = {}
+        self.camera_frames = 0
+        self._stop = threading.Event()
+        self._drain = None
+
+    def start(self):
+        if "camera" in self.devices:
+            try:
+                self.camera = vision.open_camera(vision.load_camera_config())
+                self._drain = threading.Thread(target=self._drain_camera, daemon=True)
+                self._drain.start()
+            except Exception as error:
+                self.errors["camera"] = str(error)
+        if "imu" in self.devices:
+            try:
+                import imu
+                self.imu_state = imu.start_imu()
+            except Exception as error:
+                self.errors["imu"] = str(error)
+        if "gps" in self.devices:
+            try:
+                import phone
+                self.phone_state = phone.start_phone()
+            except Exception as error:
+                self.errors["gps"] = str(error)
+
+    def _drain_camera(self):
+        frames = self.camera["frames"]
+        while not self._stop.is_set():
+            try:
+                frames.get(timeout=0.5)
+                self.camera_frames += 1
+            except queue.Empty:
+                pass
+
+    def status(self):
+        """지금 각 장비가 데이터를 받고 있는지."""
+        imu_last = self.imu_state.get("last_sample_time_s") if self.imu_state else None
+        gps = self.phone_state.get("latest_gps") if self.phone_state else None
+        return {"camera_frames": self.camera_frames,
+                "camera_error": self.camera.get("error") if self.camera else self.errors.get("camera"),
+                "imu_receiving": imu_last is not None, "gps_receiving": gps is not None,
+                "errors": dict(self.errors)}
+
+    def stop(self):
+        self._stop.set()
+        if self._drain is not None:
+            self._drain.join(timeout=2)
+        for name, module, close, state in (("camera", "vision", "close_camera", self.camera),
+                                           ("imu", "imu", "stop_imu", self.imu_state),
+                                           ("gps", "phone", "stop_phone", self.phone_state)):
+            if state is not None:
+                try:
+                    getattr(__import__(module), close)(state)
+                except Exception as error:
+                    print(f"{name} 종료 실패: {error}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------- 시간 재기
 
 class Meter:
@@ -387,7 +462,7 @@ def run_single(camera, models, interval_s, n_windows, policy, origin, gyro_rms):
 # ---------------------------------------------------------------- 한 번의 측정
 
 def measure(recording, rows, models, meter, sampler, *, policy, interval_s, start_s, duration_s,
-            source_fps, warmup, gyro_rms):
+            source_fps, warmup, gyro_rms, live_load=None):
     n_windows = int(duration_s // interval_s)
     if n_windows < 1:
         raise ValueError(f"측정 시간 {duration_s}초가 간격 {interval_s}초보다 짧습니다.")
@@ -399,6 +474,7 @@ def measure(recording, rows, models, meter, sampler, *, policy, interval_s, star
     meter.quality_ms.clear()
     sampler.tag = {"policy": policy, "interval_s": interval_s}
     first_sample = len(sampler.rows)
+    load_before = live_load.camera_frames if live_load else None
     origin = time.monotonic()
     camera.start(origin)
     try:
@@ -431,6 +507,10 @@ def measure(recording, rows, models, meter, sampler, *, policy, interval_s, star
     windows = [{"policy": policy, "interval_s": interval_s, **w} for w in windows]
     windows = [{k: w[k] for k in order} for w in windows]
     summary = summarize(policy, interval_s, windows, inferences, meter.quality_ms, camera, system)
+    if live_load is not None:
+        status = live_load.status()
+        status["camera_fps"] = round((status["camera_frames"] - load_before) / (time.monotonic() - origin), 1)
+        summary["live_load"] = status
     return windows, inferences, system, summary
 
 
@@ -523,7 +603,8 @@ def markdown(report):
              f"- 실행: {env['backend']} (torch 스레드 {env['torch_threads']}), 모델 `{env['model_dir']}`,"
              f" 영역 {env['surface_region'] or '기본'}",
              f"- 녹화 {report['start_s']}초부터 간격마다 {report['duration_s']}초, 카메라 속도"
-             f" {report['source_fps'] or '녹화 그대로'}, 간격 사이 쉬는 시간 {report['cooldown_s']}초", ""]
+             f" {report['source_fps'] or '녹화 그대로'}, 간격 사이 쉬는 시간 {report['cooldown_s']}초",
+             f"- 장비 부하: {'켬 (' + ', '.join(report['live_load']) + ')' if report.get('live_load') else '끔'}", ""]
     lines += ["## 처리 간격별 요약", "",
               "| 방식 | 간격(s) | 구간 | 분석/구간 | 받은 사진 | 처리 못 함 (%) | 읽지 못함 | 분석 p95(ms) | 구간 처리 p95(ms) |"
               " 결과 지연 p95(ms) | 프로세스 CPU 평균/p95(%) | 시스템 CPU 평균(%) | RSS 최대(MB) | 온도 시작→최고(°C) | 감당 |",
@@ -545,6 +626,15 @@ def markdown(report):
         cell = lambda d: f"{fmt(d['mean'], 1)} / {fmt(d['p95'], 1)}"
         lines.append(f"| {s['policy']} | {s['interval_s']:g} | " + " | ".join(cell(st[k]) for k in STAGES) +
                      f" | {cell(s['quality_check_ms_per_call'])} | {cell(s['decode_ms'])} |")
+    loads = [s for s in report["runs"] if s.get("live_load")]
+    if loads:
+        lines += ["", "## 장비 부하 상태", "", "| 방식 | 간격(s) | 실제 카메라 fps | IMU 수신 | GPS 수신 | 오류 |",
+                  "|---|---|---|---|---|---|"]
+        for s in loads:
+            ll = s["live_load"]
+            errors = "; ".join(f"{k}: {v}" for k, v in ll["errors"].items()) or ll["camera_error"] or "-"
+            lines.append(f"| {s['policy']} | {s['interval_s']:g} | {ll['camera_fps']} |"
+                         f" {'예' if ll['imu_receiving'] else '아니오'} | {'예' if ll['gps_receiving'] else '아니오'} | {errors} |")
     pcs = [(s, s.get("pc_comparison")) for s in report["runs"] if s.get("pc_comparison")]
     if pcs:
         lines += ["", "## PC replay와 비교", "",
@@ -561,7 +651,7 @@ def markdown(report):
               "- 결과 지연: 구간이 끝난 뒤 그 구간 결과가 나오기까지 걸린 시간",
               "- 프로세스 CPU: 코어 하나를 100%로 본 값. 시스템 CPU: 전체 코어를 100%로 본 값",
               "- 감당: 구간 처리 p95와 결과 지연 p95가 모두 간격보다 작으면 예",
-              "- 실제 수집에서 함께 도는 카메라 인코딩, IMU(BLE), GPS, 업로드 부하는 포함하지 않았다"]
+              "- Supabase 업로드는 포함하지 않았다. 장비 부하가 '끔'이면 카메라 인코딩, IMU(BLE), GPS 수신도 빠진다"]
     return "\n".join(lines) + "\n"
 
 
@@ -602,6 +692,9 @@ def main():
     parser.add_argument("--torch-threads", type=int, default=inference.CONFIG["torch_threads"])
     parser.add_argument("--model-dir", default=inference.CONFIG["model_dir"])
     parser.add_argument("--surface-region", choices=("wheel_ahead",), default=inference.CONFIG["surface_region"])
+    parser.add_argument("--live-load", nargs="*", choices=("camera", "imu", "gps"), default=None,
+                        help="실제 장비를 켜 둔 채로 측정. 이름 없이 쓰면 셋 다 (예: --live-load camera imu)")
+    parser.add_argument("--live-load-warmup-s", type=float, default=10.0, help="장비를 켠 뒤 연결을 기다리는 시간(초)")
     parser.add_argument("--output", type=Path, help="결과 폴더 (기본: 녹화/pi_benchmark/<UTC 시각>)")
     args = parser.parse_args()
 
@@ -624,6 +717,14 @@ def main():
     models = inference.load_models()
     gyro_rms = gyro_lookup(recording) if "quality" in args.policy else None
     meter, sampler = Meter(), SystemSampler(args.sample_s)
+    live_devices = None if args.live_load is None else (tuple(args.live_load) or ("camera", "imu", "gps"))
+    live_load = None
+    if live_devices:
+        live_load = LiveLoad(live_devices)
+        live_load.start()
+        print(f"장비 부하 켬: {', '.join(live_devices)}. {args.live_load_warmup_s:.0f}초 연결 대기", flush=True)
+        time.sleep(args.live_load_warmup_s)
+        print(f"  상태: {live_load.status()}", flush=True)
     meter.patch()
     sampler.start()
     all_windows, all_inferences, runs = [], [], []
@@ -637,7 +738,7 @@ def main():
             windows, inferences, _, summary = measure(
                 recording, rows, models, meter, sampler, policy=policy, interval_s=interval_s,
                 start_s=args.start_s, duration_s=duration_s, source_fps=args.source_fps,
-                warmup=args.warmup, gyro_rms=gyro_rms)
+                warmup=args.warmup, gyro_rms=gyro_rms, live_load=live_load)
             summary["pc_comparison"] = compare_with_pc(recording, policy, interval_s, args.start_s, windows,
                                                        args.model_dir)
             f = summary["frames"]
@@ -654,12 +755,14 @@ def main():
     finally:
         sampler.stop()
         meter.unpatch()
+        if live_load is not None:
+            live_load.stop()
         inference.close_models(models)
 
     report = {"recording": recording.name, "recording_duration_s": session.get("duration_s"),
               "recording_target_fps": session.get("target_fps"), "started_utc": started, "finished_utc": utc_now(),
               "start_s": args.start_s, "duration_s": round(duration_s, 1), "source_fps": args.source_fps,
-              "cooldown_s": args.cooldown_s, "warmup": args.warmup, "environment": environment(args), "runs": runs}
+              "cooldown_s": args.cooldown_s, "warmup": args.warmup, "live_load": list(live_devices or []), "environment": environment(args), "runs": runs}
     output.mkdir(parents=True)
     for w in all_windows:
         for key in ("start_monotonic", "end_monotonic", "done_monotonic"):

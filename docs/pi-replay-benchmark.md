@@ -38,6 +38,9 @@ cd ~/test   # 저장소 위치
 .venv/bin/python pi_replay_benchmark.py recordings/campus_20261125T075508Z \
     --policy timed quality live --intervals 2 4 8
 
+# 실제 장비 부하: 카메라·IMU·GPS를 켜 둔 채로 같은 측정 (main.py는 끈 상태에서)
+.venv/bin/python pi_replay_benchmark.py recordings/campus_20261125T075508Z --intervals 2 4 --live-load
+
 # 발열까지 보려면 녹화 끝까지(약 16분씩)
 .venv/bin/python pi_replay_benchmark.py recordings/campus_20261125T075508Z --intervals 2 --duration-s 0
 ```
@@ -52,6 +55,8 @@ cd ~/test   # 저장소 위치
 | `--source-fps 30` | 녹화 간격(약 5장/초) | 라이브 카메라(30장/초)의 디코딩 부하 흉내. 같은 사진이 반복된다 |
 | `--start-s`, `--duration-s` | 0, 300 | 녹화의 어느 부분을 얼마나 쓸지. `--duration-s 0`은 끝까지 |
 | `--cooldown-s` | 60 | 앞 측정의 발열이 다음 측정에 섞이지 않게 쉬는 시간 |
+| `--live-load [camera imu gps]` | 끔 | 실제 장비를 켜 두고 부하만 준다. 이름 없이 쓰면 셋 다. 데이터는 분석에 쓰지 않는다 |
+| `--live-load-warmup-s` | 10 | 장비를 켠 뒤 IMU(BLE) 연결을 기다리는 시간 |
 
 측정 중에는 `main.py`나 다른 무거운 작업을 끈다. Ctrl+C로 멈추면 끝난 측정까지 저장한다.
 
@@ -78,8 +83,14 @@ cd ~/test   # 저장소 위치
 4. **PC 결과와 같은지:** `같은 사진일 때 같은 판정`이 비교 구간과 거의 같아야 PC 정확도
    결과를 Pi에 그대로 적용할 수 있다. 같은 사진 선택 수가 적으면 Pi가 바빠 사진을 놓친 것이다.
 
+## 장비 부하 비교
+
+같은 방식·간격을 `--live-load` 없이 한 번, 붙여서 한 번 잰다. 두 `summary.md`의 분석 p95,
+구간 처리 p95, 시스템 CPU 차이가 장비 부하의 영향이다. `장비 부하 상태` 표에서 실제 카메라
+fps가 약 30이고 IMU·GPS 수신이 `예`인지 먼저 확인한다. 켜지 못한 장비는 오류 칸에 남고
+나머지 장비로 측정을 계속한다. GPS 수신을 보려면 폰에서 위치 전송을 켠다.
+
 ## 한계
 
-실제 수집에서 함께 도는 카메라 인코딩(GStreamer), IMU(BLE), GPS 수신, Supabase 업로드는
-들어가지 않는다. 짧게 `main.py`를 실제로 돌려 콘솔의 `timing_ms`와 `frames=분석/받음`을
-이 측정의 `live` 결과와 비교해 차이를 적는다.
+Supabase 업로드는 어느 측정에도 들어가지 않는다. 업로드는 CPU보다 통신 대기 시간이 문제이므로
+필요하면 `main.py` 실제 수집의 `Window delivery lag`로 따로 확인한다.
