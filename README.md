@@ -2,6 +2,8 @@
 
 For the fixed-interval vs. IMU-based frame-selection experiment, use the
 [Pi recording and Mac handoff guide](docs/replay-collection.md).
+Pi에서 처리 간격별 비용(단계별 ms, 처리하지 못한 사진, CPU·메모리)을 재려면
+[Pi replay 측정](docs/pi-replay-benchmark.md)을 참고한다.
 
 Current collection uses center-weighted automatic exposure with the camera's factory exposure curve.
 Edit [camera_config.json](camera_config.json) to set exposure and local photo saving.
