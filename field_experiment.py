@@ -15,7 +15,8 @@ from record_replay import csv_output
 
 
 IMU_FIELDS = ("timestamp_s ax ay az gx gy gz roll_deg pitch_deg yaw_deg "
-              "sample_monotonic attitude_slope_deg smoothed_slope_deg").split()
+              "sample_monotonic attitude_slope_deg smoothed_slope_deg "
+              "ble_notification_id raw_hex timing_epoch").split()
 SURFACE_MARKS = ("red_1", "block_1", "red_2", "block_2", "route_end")
 
 
@@ -65,13 +66,21 @@ class FieldMarks:
             print(f"MARK {elapsed:.3f}s  {label}", flush=True)
 
 
-def record(experiment, folder, name, stopping, summarize):
+def record(experiment, folder, name, stopping, summarize, *, imu_diagnostics=False):
     import imu
 
     origin = time.monotonic()
     meta = dict(experiment=experiment, name=name, start_monotonic=origin,
                 start_utc=datetime.now(timezone.utc).isoformat(),
-                imu_hz=imu.CONFIG["sample_rate_hz"], status="starting")
+                imu_hz=imu.CONFIG["sample_rate_hz"], imu_bandwidth_hz=imu.BLE_BANDWIDTH_HZ,
+                status="starting")
+    if experiment == "frames":
+        meta["mode"] = "route"
+    registers = imu.FIELD_REGISTERS if imu_diagnostics else {imu.QUATERNION_REGISTER: "quaternion"}
+    replies = {f"0x{addr:02X}": 0 for addr in registers}
+    if imu_diagnostics:
+        replies[f"0x{imu.MAG_CHIP_REGISTER:02X}"] = 0
+    meta["imu_register_replies"] = replies
     manifest = folder / "session.json"
 
     def save_status(status):
@@ -81,13 +90,38 @@ def record(experiment, folder, name, stopping, summarize):
         temporary.replace(manifest)
 
     save_status("starting")
-    counts = {"imu": 0, "frames": 0}
+    counts = {"imu": 0, "ble_notifications": 0, "frames": 0}
     ready = False
     try:
         with ExitStack() as stack:
             imu_csv = csv_output(stack, folder, "imu.csv", "t_s " + " ".join(IMU_FIELDS))
+            ble_csv = csv_output(stack, folder, "imu_ble.csv",
+                                 "t_s ble_notification_id bytes motion_packets register_packets "
+                                 "discarded_bytes buffered_bytes")
+            register_csv = csv_output(stack, folder, "imu_registers.csv",
+                                      "t_s " + " ".join(imu.REGISTER_FIELDS))
             marks = FieldMarks(stack, folder, experiment)
+            last_gps = None
             if experiment == "frames":
+                import phone
+
+                counts["gps"] = 0
+                gps_csv = csv_output(stack, folder, "gps.csv", "t_s gps_time latitude longitude accuracy_m")
+                receiver = phone.start_phone()
+
+                def drain_gps():
+                    nonlocal last_gps
+                    with receiver["lock"]:
+                        fixes = list(receiver["gps_history"])
+                        receiver["gps_history"].clear()
+                    for fix in fixes:
+                        last_gps = fix["gps_monotonic"]
+                        gps_csv.writerow([last_gps - origin, fix["gps_time"], fix["latitude"],
+                                          fix["longitude"], fix["accuracy_m"]])
+                        counts["gps"] += 1
+
+                stack.callback(drain_gps)
+                stack.callback(phone.stop_phone, receiver)
                 image_dir = folder / "frames"
                 image_dir.mkdir()
                 frame_csv = csv_output(stack, folder, "frames.csv", "t_s frame_time file")
@@ -98,16 +132,29 @@ def record(experiment, folder, name, stopping, summarize):
                     frame_csv.writerow([stamp - origin, utc, "frames/" + filename])
                     counts["frames"] += 1
 
-            sensor = imu.start_imu(load_zero=False, record_session=True)
+            sensor = imu.start_imu(load_zero=False, record_session=True, record_ble=True,
+                                   register_addresses=registers)
 
             def drain_imu():
                 with sensor["lock"]:
                     samples = sensor["session_samples"]
                     sensor["session_samples"] = []
+                    notifications = sensor["ble_notifications"]
+                    sensor["ble_notifications"] = []
+                    register_rows = sensor["register_samples"]
+                    sensor["register_samples"] = []
+                for stamp, *fields in notifications:
+                    ble_csv.writerow([stamp - origin, *fields])
+                    counts["ble_notifications"] += 1
                 for sample in samples:
                     imu_csv.writerow([sample["sample_monotonic"] - origin,
                                       *(sample.get(key) for key in IMU_FIELDS)])
                     counts["imu"] += 1
+                for row in register_rows:
+                    register_csv.writerow([row["receive_monotonic"] - origin,
+                                           *(row.get(key) for key in imu.REGISTER_FIELDS)])
+                    addr = row["register"]
+                    replies[addr] = replies.get(addr, 0) + 1
 
             # Stop sensors before saving the last samples.
             stack.callback(marks.drain, origin)
@@ -122,10 +169,13 @@ def record(experiment, folder, name, stopping, summarize):
             next_report = origin
             while not stopping.is_set():
                 drain_imu()
+                if experiment == "frames":
+                    drain_gps()
                 if sensor["error"] or (camera and camera["error"]):
                     raise RuntimeError(sensor["error"] or camera["error"])
                 now = time.monotonic()
-                if not ready and counts["imu"] and (camera is None or counts["frames"]):
+                gps_ready = experiment != "frames" or (last_gps is not None and now - last_gps <= 3)
+                if not ready and counts["imu"] and (camera is None or counts["frames"]) and gps_ready:
                     ready = True
                     meta["ready_s"] = now - origin
                     save_status("recording")
@@ -137,16 +187,28 @@ def record(experiment, folder, name, stopping, summarize):
                     else:
                         print("Enter: red_1, block_1, red_2, block_2, route_end.", flush=True)
                 if not ready and now - origin > 60:
-                    raise RuntimeError("Timed out waiting for the first IMU sample or camera frame.")
+                    missing = []
+                    if not counts["imu"]:
+                        missing.append("IMU")
+                    if camera is not None and not counts["frames"]:
+                        missing.append("camera")
+                    if not gps_ready:
+                        missing.append("fresh phone GPS")
+                    raise RuntimeError("Timed out waiting for " + ", ".join(missing))
                 marks.drain(origin)
                 if now >= next_report:
-                    print(f"{now - origin:.1f}s  imu={counts['imu']}  frames={counts['frames']}",
-                          flush=True)
+                    totals = "  ".join(f"{key}={value}" for key, value in counts.items())
+                    totals += "  " + " ".join(f"{label}={replies[f'0x{addr:02X}']}"
+                                             for addr, label in registers.items())
+                    print(f"{now - origin:.1f}s  {totals}", flush=True)
                     next_report = now + 5
                 stopping.wait(0.02)
         if sensor["error"] or (camera and camera["error"]):
             raise RuntimeError(sensor["error"] or camera["error"])
         meta["imu_timing_resets"] = sensor["timing_resets"]
+        if sensor["disconnect_error"]:
+            meta["imu_disconnect_error"] = sensor["disconnect_error"]
+        meta["imu_register_error"] = sensor["register_error"]
         if summarize is not None and ready:
             summarize(folder)
         meta.update(counts)
@@ -155,13 +217,17 @@ def record(experiment, folder, name, stopping, summarize):
         meta.update(counts, error=str(error))
         save_status("failed")
         raise
-    print(f"Saved {counts['imu']} IMU samples and {counts['frames']} frames in {folder}", flush=True)
+    totals = "  ".join(f"{key}={value}" for key, value in counts.items())
+    quaternion_count = replies[f"0x{imu.QUATERNION_REGISTER:02X}"]
+    print(f"Saved {totals}  quaternion={quaternion_count} in {folder}", flush=True)
 
 
 def run(experiment, description, *, summarize=None):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--name", required=True, type=session_name, help="surface or route folder name")
     parser.add_argument("--output", type=Path, default=Path("recordings"), help="base output directory")
+    parser.add_argument("--imu-diagnostics", action="store_true",
+                        help="also poll magnetic field, port status, pressure, temperature and battery")
     args = parser.parse_args()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     folder = args.output / experiment / args.name / stamp
@@ -172,4 +238,4 @@ def run(experiment, description, *, summarize=None):
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous = signal.signal(sig, lambda *_: stopping.set())
             handlers.callback(signal.signal, sig, previous)
-        record(experiment, folder, args.name, stopping, summarize)
+        record(experiment, folder, args.name, stopping, summarize, imu_diagnostics=args.imu_diagnostics)

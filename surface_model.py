@@ -244,7 +244,7 @@ class Backend:
 class OnnxRuntimeBackend(Backend):
     """CPU (or any ORT provider) execution for PC-side verification."""
 
-    def __init__(self, model_path, providers=None):
+    def __init__(self, model_path, providers=None, *, session_options=None):
         import onnxruntime as ort
 
         model_path = Path(model_path)
@@ -252,7 +252,7 @@ class OnnxRuntimeBackend(Backend):
             raise FileNotFoundError(f"ONNX model not found: {model_path}")
         if providers is None:
             providers = ["CPUExecutionProvider"]
-        self.session = ort.InferenceSession(str(model_path), providers=providers)
+        self.session = ort.InferenceSession(str(model_path), sess_options=session_options, providers=providers)
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
 
@@ -317,14 +317,14 @@ class SurfaceModel:
         self.spec = spec
 
     @classmethod
-    def from_onnxruntime(cls, model_dir=MODEL_DIR, providers=None) -> "SurfaceModel":
+    def from_onnxruntime(cls, model_dir=MODEL_DIR, providers=None, *, session_options=None) -> "SurfaceModel":
         model_dir = Path(model_dir)
         spec = load_spec(model_dir / "model-spec.json")
         area_path = model_dir / spec["models"]["area"]["path"]
         material_path = model_dir / spec["models"]["material"]["path"]
         return cls(
-            OnnxRuntimeBackend(area_path, providers),
-            OnnxRuntimeBackend(material_path, providers),
+            OnnxRuntimeBackend(area_path, providers, session_options=session_options),
+            OnnxRuntimeBackend(material_path, providers, session_options=session_options),
             spec,
         )
 

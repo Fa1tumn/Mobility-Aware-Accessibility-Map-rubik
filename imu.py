@@ -2,6 +2,7 @@ import argparse
 import asyncio
 from collections import deque
 from datetime import datetime, timezone
+from itertools import chain, cycle
 import json
 import math
 import os
@@ -27,6 +28,19 @@ CALIBRATION_PATH = Path(__file__).with_name("imu_calibration.json")
 _level_gravity = None
 _attitude_level_gravity = None
 SLOPE_METHOD = "fused_attitude_ema_mean_v1"
+BLE_BANDWIDTH_HZ = 42
+
+# WT901BLE5.0 returns eight little-endian words starting at the requested address.
+QUATERNION_REGISTER = 0x51
+FIELD_REGISTERS = {QUATERNION_REGISTER: "quaternion", 0x3A: "magnetic", 0x41: "ports",
+                   0x40: "temperature", 0x64: "battery"}
+MAG_CHIP_REGISTER = 0x72
+MAG_UT_PER_COUNT = {1: 0.6, 2: 0.15, 3: 0.013, 4: 0.15, 5: 0.098,
+                    6: 1 / 150, 7: 1 / 120, 8: 0.020}
+REGISTER_FIELDS = ("register raw_hex mag_chip_id mag_x_raw mag_y_raw mag_z_raw "
+                   "mag_x_ut mag_y_ut mag_z_ut q0 q1 q2 q3 "
+                   "d0_status_raw d1_status_raw d2_status_raw d3_status_raw "
+                   "pressure_pa barometric_height_m temperature_c battery_v").split()
 
 
 def level_basis(gravity):
@@ -95,12 +109,13 @@ def save_level_zero(samples):
     _attitude_level_gravity = attitude_gravity.tolist()
 
 
-def start_imu(load_zero=True, record_session=False) -> dict:
+def start_imu(load_zero=True, record_session=False, *, register_addresses=(), record_ble=False) -> dict:
     tau = CONFIG["slope_filter_tau_s"]
     if not math.isfinite(tau) or tau < 0:
         raise ValueError("slope_filter_tau_s must be finite and nonnegative.")
     if load_zero:
         load_calibration()
+    register_addresses = tuple(register_addresses)
     imu_state = {
         "samples": deque(maxlen=2000),
         "lock": threading.Lock(),
@@ -111,10 +126,15 @@ def start_imu(load_zero=True, record_session=False) -> dict:
         "byte_buffer": bytearray(),
         "received_samples": 0,
         "error": None,
+        "disconnect_error": None,
         "slope_filter": None,
         "timing_resets": 0,
-        # Only the standalone monitor opts in. main.py never writes a report.
         "session_samples": [] if record_session else None,
+        "register_addresses": register_addresses,
+        "register_samples": [] if register_addresses else None,
+        "register_error": None,
+        "ble_notifications": [] if record_ble else None,
+        "ble_notification_id": 0,
     }
     if CONFIG["device_address"] is None or CONFIG["notify_uuid"] is None:
         print("IMU Bluetooth is not configured; IMU values will be NULL.")
@@ -145,13 +165,45 @@ def decode_packet(data, timestamp_s) -> dict:
     }
 
 
+def decode_registers(packet, mag_chip_id=None):
+    address = int.from_bytes(packet[2:4], "little")
+    row = {"register": f"0x{address:02X}", "raw_hex": packet.hex()}
+    if address == 0x3A:
+        scale = MAG_UT_PER_COUNT.get(mag_chip_id)
+        row["mag_chip_id"] = mag_chip_id
+        for axis, raw in zip("xyz", struct.unpack_from("<3h", packet, 4)):
+            row[f"mag_{axis}_raw"] = raw
+            if scale is not None:
+                row[f"mag_{axis}_ut"] = raw * scale
+    elif address == QUATERNION_REGISTER:
+        for i, word in enumerate(struct.unpack_from("<4h", packet, 4)):
+            row[f"q{i}"] = word / 32768
+    elif address == 0x41:
+        for i, word in enumerate(struct.unpack_from("<4H", packet, 4)):
+            row[f"d{i}_status_raw"] = word
+        pressure, height_cm = struct.unpack_from("<ii", packet, 12)
+        # Some firmware returns a zero-filled barometer block.
+        if 30000 <= pressure <= 110000:
+            row.update(pressure_pa=pressure, barometric_height_m=height_cm / 100)
+    elif address == 0x40:
+        row["temperature_c"] = struct.unpack_from("<h", packet, 4)[0] / 100
+    elif address == 0x64:
+        row["battery_v"] = struct.unpack_from("<H", packet, 4)[0] / 100
+    elif address == MAG_CHIP_REGISTER:
+        row["mag_chip_id"] = struct.unpack_from("<H", packet, 4)[0]
+    return row
+
+
 def receive_data(imu_state, data):
+    receive_time = time.monotonic()
     buffer = imu_state["byte_buffer"]
     buffer.extend(data)
     packets = []
+    register_count = discarded_bytes = 0
     while len(buffer) >= 2:
         if buffer[0] != 0x55 or buffer[1] not in (0x61, 0x71):
             del buffer[0]
+            discarded_bytes += 1
             continue
         if len(buffer) < 20:
             break
@@ -159,6 +211,24 @@ def receive_data(imu_state, data):
         del buffer[:20]
         if packet[1] == 0x61:
             packets.append(packet)
+            continue
+        register_count += 1
+        if imu_state.get("register_samples") is not None:
+            row = decode_registers(packet, imu_state.get("mag_chip_id"))
+            if int(row["register"], 16) == MAG_CHIP_REGISTER:
+                imu_state["mag_chip_id"] = row["mag_chip_id"]
+            row["receive_monotonic"] = receive_time
+            with imu_state["lock"]:
+                imu_state["register_samples"].append(row)
+    notification_id = None
+    if imu_state.get("ble_notifications") is not None:
+        with imu_state["lock"]:
+            imu_state["ble_notification_id"] += 1
+            notification_id = imu_state["ble_notification_id"]
+            imu_state["ble_notifications"].append((
+                receive_time, notification_id, len(data), len(packets), register_count,
+                discarded_bytes, len(buffer),
+            ))
     if not packets:
         return
 
@@ -167,7 +237,6 @@ def receive_data(imu_state, data):
     if timestamp_s is None:
         timestamp_s = 0.0
     last_timestamp_s = timestamp_s + len(packets) * sample_interval
-    receive_time = time.monotonic()
     with imu_state["lock"]:
         clock_offset = imu_state["clock_offset_s"]
         # Default packets have no device timestamp; reset the window after a large timing error.
@@ -186,11 +255,15 @@ def receive_data(imu_state, data):
     for index, packet in enumerate(packets):
         sample_time_s = timestamp_s + (index + 1) * sample_interval
         payload = decode_packet(packet, sample_time_s)
-        if not add_sample(imu_state, payload):
+        capture = None
+        if notification_id is not None:
+            capture = {"ble_notification_id": notification_id, "raw_hex": packet.hex(),
+                       "timing_epoch": imu_state["timing_resets"]}
+        if not add_sample(imu_state, payload, capture=capture):
             raise ValueError("Invalid or out-of-order IMU sample.")
 
 
-def add_sample(imu_state: dict, payload: dict) -> bool:
+def add_sample(imu_state: dict, payload: dict, *, capture=None) -> bool:
     if not isinstance(payload, dict):
         return False
     keys = ("timestamp_s", "ax", "ay", "az", "gx", "gy", "gz")
@@ -220,7 +293,10 @@ def add_sample(imu_state: dict, payload: dict) -> bool:
         _filter_attitude(imu_state, sample)
         imu_state["samples"].append(sample)
         if imu_state.get("session_samples") is not None:
-            imu_state["session_samples"].append(sample.copy())
+            recorded = sample.copy()
+            if capture is not None:
+                recorded.update(capture)
+            imu_state["session_samples"].append(recorded)
         imu_state["last_sample_time_s"] = sample["timestamp_s"]
         imu_state["received_samples"] += 1
         imu_state["error"] = None
@@ -290,6 +366,7 @@ def _read_bluetooth(imu_state: dict) -> None:
 
 async def _receive_bluetooth(imu_state: dict) -> None:
     from bleak import BleakClient
+    from bleak.exc import BleakError
 
     def on_data(sender, data):
         try:
@@ -323,13 +400,34 @@ async def _receive_bluetooth(imu_state: dict) -> None:
         if imu_state["stop_event"].is_set():
             return
         await asyncio.wait_for(client.start_notify(CONFIG["notify_uuid"], on_data), timeout=3)
-        print(f"IMU connected: output={CONFIG['sample_rate_hz']} Hz, bandwidth=42 Hz.")
+        print(f"IMU connected: output={CONFIG['sample_rate_hz']} Hz, bandwidth={BLE_BANDWIDTH_HZ} Hz.")
+        addresses = imu_state["register_addresses"]
+        # Query the chip ID once when collecting magnetic measurements.
+        initial = (MAG_CHIP_REGISTER,) if 0x3A in addresses else ()
+        registers = chain(initial, cycle(addresses))
+        address = next(registers, None)
         while not imu_state["stop_event"].is_set():
             if not client.is_connected:
                 raise RuntimeError("IMU Bluetooth connection was lost.")
-            await asyncio.sleep(0.05)
+            if address is not None and imu_state["register_error"] is None:
+                request = bytes((0xFF, 0xAA, 0x27, address, 0))
+                try:
+                    await asyncio.wait_for(
+                        client.write_gatt_char(CONFIG["write_uuid"], request, response=True), timeout=3
+                    )
+                except (TimeoutError, BleakError) as error:
+                    imu_state["register_error"] = f"0x{address:02X}: {str(error) or type(error).__name__}"
+                    print(f"IMU register polling stopped: {imu_state['register_error']}", flush=True)
+                address = next(registers, None)
+                await asyncio.sleep(0.1)
+            else:
+                await asyncio.sleep(0.05)
     finally:
-        await asyncio.wait_for(client.disconnect(), timeout=2)
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=5)
+        except (TimeoutError, BleakError) as error:
+            imu_state["disconnect_error"] = str(error) or type(error).__name__
+            print(f"IMU Bluetooth disconnect warning: {imu_state['disconnect_error']}", flush=True)
 
 
 def get_window(imu_state: dict, frame_monotonic: float) -> list:
@@ -428,7 +526,7 @@ def stop_imu(imu_state: dict) -> None:
     imu_state["stop_event"].set()
     thread = imu_state["thread"]
     if thread is not None and thread.ident is not None:
-        thread.join(timeout=15)
+        thread.join(timeout=20)
         if thread.is_alive():
             raise RuntimeError("IMU Bluetooth thread did not stop.")
 

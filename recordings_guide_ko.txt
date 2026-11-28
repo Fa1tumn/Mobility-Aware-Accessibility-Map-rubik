@@ -1,0 +1,91 @@
+휠체어 현장 실험 데이터 읽기 안내
+
+압축을 풀면 recordings 아래에 네 개의 폴더가 있습니다. 현장 사진과 위치는 frames, 노면 예측 결과는 frames_v3_2s_wheel_ahead, 구간별 진동과 자세는 imu, 손을 뗀 뒤 멈출 때까지의 주행 결과는 coast에서 확인합니다.
+
+block, red_block 등은 수집할 때 붙인 이름입니다. 그 아래의 타임스탬프 폴더 하나가 수집 한 회차에 해당합니다. 표에서 t_s는 해당 회차의 수집 시작 후 경과한 시간(초)입니다.
+
+
+1. frames — 현장 사진과 촬영 위치
+
+frames.csv에서 사진을 찾은 다음, 같은 회차의 frames 폴더에서 해당 JPG 파일을 엽니다.
+
+  frames.csv
+    한 행이 사진 한 장에 해당합니다. file은 사진 경로, t_s는 수집 시작 후 경과 시간, frame_time은 사진이 기록된 UTC 시각입니다.
+
+  frames/*.jpg
+    카메라에서 받은 원본 사진입니다. 흐리거나 너무 밝거나 어두운 사진도 포함됩니다.
+
+  gps.csv
+    한 행이 휴대전화의 위치 측정 한 건입니다. latitude와 longitude는 위도와 경도이며, accuracy_m은 휴대전화가 보고한 위치 정확도(m)입니다.
+
+  session.json
+    수집 시작 시각, 기록 준비가 완료된 시점, 종료 상태 등을 담고 있습니다. finished는 수집이 정상적으로 끝났다는 뜻입니다.
+
+예를 들어 0000005.jpg의 촬영 위치를 찾으려면 frames.csv에서 사진의 t_s를 확인합니다. 같은 회차의 gps.csv에서 t_s가 가장 가까운 행을 찾아 위도, 경도, accuracy_m을 함께 봅니다. 카메라와 GPS의 기록 주기가 다르므로 시간 차이도 확인합니다.
+
+
+2. frames_v3_2s_wheel_ahead — 휠체어 전방의 노면 예측
+
+프로그램은 사진을 2초 단위로 묶고, 각 구간에서 노출이 적절한 사진 중 노면이 가장 선명한 한 장을 선택합니다. 모델은 사진의 하단 절반에서 가로로 중앙 절반에 해당하는 영역을 보고 노면 재질을 판별합니다.
+
+  summary.csv
+    한 행이 수집 한 회차입니다. frames는 후보 사진 수, windows는 2초 구간 수입니다. blocks, asphalt, unknown 등의 열은 각 범주로 판별된 구간 수를 나타냅니다. unknown은 모델이 재질을 특정하지 못했다는 뜻입니다.
+
+  predictions.csv
+    한 행이 2초 구간 하나입니다. window_start_s와 window_end_s는 구간의 시작과 끝, candidates는 후보 사진 수, t_s는 선택된 사진의 기록 시점입니다. surface_label은 예측한 노면 종류, surface_confidence는 모델의 신뢰도입니다. previous_surface_label은 이전 판별 방식의 결과이며, label_changed가 1이면 예측 범주가 달라졌다는 뜻입니다.
+
+  selected_frames/*.jpg
+    판별에 실제로 사용한 사진입니다. predictions.csv의 selected_frame에 적힌 경로를 열면 사진과 예측 결과를 대조할 수 있습니다.
+
+  wheel-ahead-predictions-en.png
+    노면 예측 결과를 영어로 정리한 이미지입니다.
+
+예를 들어 block 회차의 첫 구간(0~2초)에서는 후보 사진 19장 중 1.037초에 기록된 0000005.jpg가 선택됐습니다. 모델은 노면을 blocks(블록 포장)로 판별했고 신뢰도는 약 0.983이었습니다.
+
+
+3. imu — 노면 구간별 진동과 자세
+
+먼저 marks.csv에서 관심 있는 구간의 시작과 끝을 찾고, 같은 회차의 imu.csv에서 그 시간대의 측정값을 봅니다.
+
+  marks.csv
+    현장에서 입력한 구간 표시입니다. 예를 들어 red_1은 첫 번째 붉은색 노면에 진입한 시점, block_1은 첫 번째 블록 포장 구간에 진입한 시점입니다.
+
+  imu.csv
+    한 행이 한 시점의 움직임 측정값입니다. ax, ay, az는 중력을 포함한 3축 가속도(m/s²)이고, gx, gy, gz는 3축 각속도(rad/s)입니다. roll_deg, pitch_deg, yaw_deg는 각각 롤, 피치, 요 각도(°)입니다.
+
+  imu_ble.csv
+    블루투스 알림별 수신 시각, 바이트 수, 패킷 수를 기록합니다. 데이터가 끊기거나 수신이 지연된 구간을 확인할 때 사용합니다.
+
+  imu_registers.csv
+    센서 레지스터에서 읽은 값입니다. register가 0x51인 행의 q0~q3는 센서 자세를 나타내는 쿼터니언의 네 성분입니다.
+
+  session.json
+    해당 실험의 샘플링 설정, 수집 시간, 샘플 수, 종료 상태를 담고 있습니다.
+
+예를 들어 imu/1에서는 20.53초에 red_1, 43.57초에 block_1이 기록됐습니다. 첫 번째 붉은색 노면의 진동은 imu.csv에서 20.53초 이상, 43.57초 미만인 행을 골라 가속도 변화를 보면 됩니다.
+
+
+4. coast — 손을 뗀 뒤 멈출 때까지의 타력 주행
+
+한 회차에서 타력 주행을 여러 번 측정할 수 있습니다. trial은 해당 회차에서 몇 번째 주행인지를 나타냅니다.
+
+  분석에서 제외할 측정 오류 구간
+    coast/block  — 4번째 주행 (release_4 ~ stop_4)
+    coast/block4 — 3번째 주행 (release_3 ~ stop_3)
+    coast/block4 — 4번째 주행 (release_4 ~ stop_4)
+
+    위 구간은 측정 오류가 있었으므로 주행 시간과 평균 감속도 분석에서 제외합니다. trials.csv와 coast_summary.csv를 집계할 때도 폴더명과 trial 번호를 함께 확인하여 해당 주행을 제외합니다.
+
+  coast_summary.csv
+    한 행이 한 번의 타력 주행입니다. coast_s는 손을 뗀 뒤 완전히 멈출 때까지 걸린 시간(초)이고, mean_decel_m_s2는 추정 평균 감속도(m/s²)입니다. status가 insufficient_imu_coverage이면 계산에 필요한 IMU 데이터가 부족해 감속도 칸이 비어 있습니다.
+
+  trials.csv
+    release_s는 손을 뗀 시점이고 stop_s는 완전히 멈춘 시점입니다. 두 값의 차이가 coast_s입니다.
+
+  marks.csv
+    현장에서 수동으로 입력한 이벤트 기록입니다. 예를 들어 release_1과 stop_1은 각각 첫 번째 주행에서 손을 뗀 시점과 완전히 멈춘 시점을 표시합니다.
+
+  imu.csv, imu_ble.csv, imu_registers.csv, session.json
+    각각 해당 회차의 움직임 측정값, 블루투스 수신 기록, 센서 레지스터 값, 수집 정보를 담고 있습니다.
+
+예를 들어 coast/block의 첫 번째 주행에서는 8.767초에 손을 뗐고 12.020초에 완전히 멈췄습니다. 타력 주행 시간은 두 시점의 차이인 3.253초입니다. 평균 감속도는 주행 중의 전방 가속도와 정지 후의 전방 가속도를 비교해 추정합니다.

@@ -1,4 +1,4 @@
-"""Save every received camera JPEG and IMU sample for a campus route."""
+"""Save camera JPEGs, IMU samples and phone GPS fixes for a campus route."""
 from field_experiment import run
 
 
